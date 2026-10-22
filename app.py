@@ -1257,7 +1257,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
 
             ax.tick_params(axis='both', colors='black', labelsize=9)
 
-            # Deduplicate legend labels and place the legend below the chart
+            # Deduplicate legend labels and place the legend just below the chart
             handles, labels = ax.get_legend_handles_labels()
             uniq_handles, uniq_labels = [], []
             for h, lab in zip(handles, labels):
@@ -1266,18 +1266,22 @@ elif app_mode == "🎛️ Control Limit Calculator":
                     uniq_labels.append(lab)
             ax.legend(
                 uniq_handles, uniq_labels,
-                loc="upper center", bbox_to_anchor=(0.5, -0.18),
-                ncol=2, frameon=False, fontsize=9, handlelength=2.2,
-                columnspacing=1.5, handletextpad=0.5
+                loc="upper center", bbox_to_anchor=(0.5, -0.06),
+                ncol=min(3, len(uniq_labels)), frameon=False, fontsize=9,
+                handlelength=2.0, columnspacing=1.2, handletextpad=0.5
             )
 
-            # Small note mapping axis index to actual batch number
-            batch_note = "Batch mapping: " + ", ".join([f"{i+1}={b}" for i, b in enumerate(ordered_batches)])
-            ax.text(0.0, -0.30, batch_note, transform=ax.transAxes, fontsize=8.3, color="#4b5563", ha="left", va="top")
-
-            fig.subplots_adjust(bottom=0.34, right=0.96)
+            fig.subplots_adjust(bottom=0.22, right=0.96)
             st.pyplot(fig)
             plt.close(fig)
+
+            # Clean batch-sequence mapping shown OUTSIDE the chart area
+            map_df = pd.DataFrame({
+                "Seq": list(range(1, len(ordered_batches) + 1)),
+                "Batch No.": ordered_batches
+            })
+            st.caption("Batch sequence mapping")
+            st.dataframe(map_df, hide_index=True, use_container_width=True)
 
         with col_table:
             current_lab = (
