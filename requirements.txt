@@ -1,6 +1,7 @@
 streamlit
 pandas
-matplotlib
 numpy
+matplotlib
 python-docx
-scipy
+openpyxl
+xlrd
