@@ -1195,60 +1195,87 @@ elif app_mode == "🎛️ Control Limit Calculator":
 
         with col_chart:
             fig, ax = plt.subplots(figsize=(10.5, 5.0))
+
+            # Excel-like framed chart area
             fig.patch.set_facecolor("white")
+            fig.patch.set_edgecolor("#8a8a8a")
+            fig.patch.set_linewidth(1.2)
             ax.set_facecolor("white")
 
             ordered_batches = pair_f["製造批號"].tolist()
             x = np.arange(len(ordered_batches))
 
             ax.plot(
-                x, pair_f["LAB"].values,
-                marker="^", linestyle="-", linewidth=2.0, markersize=7,
-                color="#2f6bff", markerfacecolor="white", markeredgewidth=1.8,
-                label="LAB Input"
+                x, pair_f["LINE"].values,
+                marker="D", linestyle="-", linewidth=1.6, markersize=5.5,
+                color="#5b9bd5", markerfacecolor="#5b9bd5", markeredgewidth=0,
+                label=f"{f}*LINE"
             )
             ax.plot(
-                x, pair_f["LINE"].values,
-                marker="o", linestyle="-", linewidth=2.0, markersize=7,
-                color="#f59e0b", markerfacecolor="white", markeredgewidth=1.8,
-                label="LINE Output"
+                x, pair_f["LAB"].values,
+                marker="s", linestyle="-", linewidth=1.6, markersize=5.5,
+                color="#ed7d31", markerfacecolor="#ed7d31", markeredgewidth=0,
+                label=f"{f}*LAB"
             )
 
             # Current LINE limits show whether the output remains controlled.
             if line_lcl_sheet is not None and line_ucl_sheet is not None:
-                ax.axhline(line_lcl_sheet, color="#dc2626", linestyle="--", linewidth=1.6, label="Current LINE LCL/UCL")
-                ax.axhline(line_ucl_sheet, color="#dc2626", linestyle="--", linewidth=1.6)
+                ax.axhline(line_lcl_sheet, color="#dc2626", linestyle="--", linewidth=1.2, label="LINE LCL/UCL")
+                ax.axhline(line_ucl_sheet, color="#dc2626", linestyle="--", linewidth=1.2)
 
                 ooc_mask = (pair_f["LINE"] < line_lcl_sheet) | (pair_f["LINE"] > line_ucl_sheet)
                 if ooc_mask.any():
                     ax.scatter(
                         x[ooc_mask.values], pair_f.loc[ooc_mask, "LINE"],
-                        s=85, color="#dc2626", marker="o", zorder=6,
+                        s=75, color="#dc2626", marker="o", zorder=6,
                         label="LINE OOC"
                     )
 
             # Candidate incoming LAB range is the main output of this task.
             if has_overlap:
-                ax.axhspan(rec_lcl, rec_ucl, color="#dbeafe", alpha=0.45, label="Recommended LAB Zone")
-                ax.axhline(rec_lcl, color="#2563eb", linestyle=":", linewidth=1.8)
-                ax.axhline(rec_ucl, color="#2563eb", linestyle=":", linewidth=1.8)
+                ax.axhspan(rec_lcl, rec_ucl, color="#dbeafe", alpha=0.35, label="Recommended LAB Zone")
+                ax.axhline(rec_lcl, color="#2563eb", linestyle=":", linewidth=1.4)
+                ax.axhline(rec_ucl, color="#2563eb", linestyle=":", linewidth=1.4)
 
             if lab_lcl_sheet is not None and lab_ucl_sheet is not None:
-                ax.axhline(lab_lcl_sheet, color="#64748b", linestyle="-.", linewidth=1.3, label="Current LAB LCL/UCL")
-                ax.axhline(lab_ucl_sheet, color="#64748b", linestyle="-.", linewidth=1.3)
+                ax.axhline(lab_lcl_sheet, color="#7f7f7f", linestyle="-.", linewidth=1.0, label="LAB LCL/UCL")
+                ax.axhline(lab_ucl_sheet, color="#7f7f7f", linestyle="-.", linewidth=1.0)
 
             ax.set_xticks(x)
-            ax.set_xticklabels(ordered_batches, rotation=45, ha="right", fontsize=9)
+            ax.set_xticklabels([str(i) for i in range(1, len(ordered_batches) + 1)], fontsize=9)
             ax.set_ylabel(f)
-            ax.set_title(f"{f} — Incoming LAB vs Production LINE", fontsize=14, fontweight="bold", pad=12)
-            ax.grid(axis="y", color="#e5e7eb", linestyle="-", linewidth=0.8)
+            ax.set_xlabel("Batch Sequence", fontsize=10)
+            ax.set_title(f"Analysis: {f} (LAB vs LINE)", fontsize=14, fontweight="bold", pad=12)
+            ax.grid(axis="y", color="#bfbfbf", linestyle="-", linewidth=0.8)
             ax.grid(axis="x", visible=False)
-            for spine in ["top", "right"]:
-                ax.spines[spine].set_visible(False)
-            ax.spines["left"].set_color("#cbd5e1")
-            ax.spines["bottom"].set_color("#cbd5e1")
-            ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False, fontsize=9)
-            fig.subplots_adjust(right=0.78, bottom=0.24)
+
+            # Full border around plot area like the user's example
+            for spine in ["top", "right", "left", "bottom"]:
+                ax.spines[spine].set_visible(True)
+                ax.spines[spine].set_color("#7f7f7f")
+                ax.spines[spine].set_linewidth(0.9)
+
+            ax.tick_params(axis='both', colors='black', labelsize=9)
+
+            # Deduplicate legend labels and place the legend below the chart
+            handles, labels = ax.get_legend_handles_labels()
+            uniq_handles, uniq_labels = [], []
+            for h, lab in zip(handles, labels):
+                if lab not in uniq_labels:
+                    uniq_handles.append(h)
+                    uniq_labels.append(lab)
+            ax.legend(
+                uniq_handles, uniq_labels,
+                loc="upper center", bbox_to_anchor=(0.5, -0.18),
+                ncol=2, frameon=False, fontsize=9, handlelength=2.2,
+                columnspacing=1.5, handletextpad=0.5
+            )
+
+            # Small note mapping axis index to actual batch number
+            batch_note = "Batch mapping: " + ", ".join([f"{i+1}={b}" for i, b in enumerate(ordered_batches)])
+            ax.text(0.0, -0.30, batch_note, transform=ax.transAxes, fontsize=8.3, color="#4b5563", ha="left", va="top")
+
+            fig.subplots_adjust(bottom=0.34, right=0.96)
             st.pyplot(fig)
             plt.close(fig)
 
