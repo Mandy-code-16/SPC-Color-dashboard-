@@ -43,30 +43,110 @@ if st.button("🔄 Refresh data"):
 st.markdown("""<style>[data-testid="stSidebar"] {background-color: #f6f8fa;}</style>""", unsafe_allow_html=True)
 
 # =========================
-# GOOGLE SHEET LINKS
+# FILE UPLOAD DATA SOURCE
 # =========================
-DATA_URL = "https://docs.google.com/spreadsheets/d/1lqsLKSoDTbtvAsHzJaEri8tPo5pA3vqJ__LVHp2R534/export?format=csv"
-LIMIT_URL = "https://docs.google.com/spreadsheets/d/1jbP8puBraQ5Xgs9oIpJ7PlLpjIK3sltrgbrgKUcJ-Qo/export?format=csv"
+st.sidebar.markdown("### 📂 Data Upload")
+st.sidebar.caption("Upload the 2 source files used by the SPC app.")
+
+uploaded_data_file = st.sidebar.file_uploader(
+    "1️⃣ Production / SPC Data",
+    type=["csv", "xlsx", "xls"],
+    key="upload_spc_data",
+    help="Main SPC dataset containing Time, 製造批號, 塗料編號, LAB and LINE color data."
+)
+
+uploaded_limit_file = st.sidebar.file_uploader(
+    "2️⃣ Control Limit Data",
+    type=["csv", "xlsx", "xls"],
+    key="upload_limit_data",
+    help="Control-limit table containing Color_code, Control_batch and LAB/LINE LCL-UCL columns."
+)
+
+@st.cache_data(show_spinner=False)
+def read_uploaded_table(file_bytes, file_name):
+    """Read an uploaded CSV/Excel file from bytes."""
+    name = str(file_name).lower()
+    bio = io.BytesIO(file_bytes)
+
+    if name.endswith(".csv"):
+        # Try common encodings used by exported Google Sheets / Taiwanese Windows files.
+        last_error = None
+        for enc in ["utf-8-sig", "utf-8", "cp950", "big5"]:
+            try:
+                bio.seek(0)
+                return pd.read_csv(bio, encoding=enc)
+            except UnicodeDecodeError as e:
+                last_error = e
+        raise last_error
+
+    if name.endswith((".xlsx", ".xls")):
+        bio.seek(0)
+        return pd.read_excel(bio)
+
+    raise ValueError("Unsupported file format. Please upload CSV, XLSX, or XLS.")
+
+# Stop here until both files have been uploaded.
+if uploaded_data_file is None or uploaded_limit_file is None:
+    st.title("📊 SPC Color Dashboard")
+    st.info(
+        "Please upload both source files in the left sidebar:\n\n"
+        "**1. Production / SPC Data**  \n"
+        "**2. Control Limit Data**"
+    )
+    st.stop()
+
+try:
+    df_raw = read_uploaded_table(uploaded_data_file.getvalue(), uploaded_data_file.name)
+    limit_df = read_uploaded_table(uploaded_limit_file.getvalue(), uploaded_limit_file.name)
+except Exception as e:
+    st.error(f"❌ Unable to read uploaded file: {e}")
+    st.stop()
 
 # =========================
-# LOAD DATA & CLEANING
+# BASIC FILE VALIDATION
 # =========================
-@st.cache_data(ttl=300)
-def load_data():
-    df = pd.read_csv(DATA_URL)
-    df["Time"] = pd.to_datetime(df["Time"])
+def clean_column_names(df):
+    df = df.copy()
+    df.columns = (
+        df.columns.astype(str)
+        .str.replace("\r\n", " ", regex=False)
+        .str.replace("\n", " ", regex=False)
+        .str.replace("　", " ", regex=False)
+        .str.replace(r"\s+", " ", regex=True)
+        .str.strip()
+    )
     return df
 
-@st.cache_data(ttl=300)
-def load_limit():
-    return pd.read_csv(LIMIT_URL)
+df_raw = clean_column_names(df_raw)
+limit_df = clean_column_names(limit_df)
 
-df_raw = load_data()
-limit_df = load_limit()
+required_data_cols = ["Time", "製造批號", "塗料編號"]
+missing_data_cols = [c for c in required_data_cols if c not in df_raw.columns]
+if missing_data_cols:
+    st.error(
+        "❌ File 1 (Production / SPC Data) is missing required columns: "
+        + ", ".join(missing_data_cols)
+    )
+    st.stop()
 
-# Clean column names
-df_raw.columns = df_raw.columns.str.replace("\r\n", " ", regex=False).str.replace("\n", " ", regex=False).str.replace("　", " ", regex=False).str.replace(r"\s+", " ", regex=True).str.strip()
-limit_df.columns = limit_df.columns.str.replace("\r\n", " ", regex=False).str.replace("\n", " ", regex=False).str.replace("　", " ", regex=False).str.replace(r"\s+", " ", regex=True).str.strip()
+required_limit_cols = ["Color_code"]
+missing_limit_cols = [c for c in required_limit_cols if c not in limit_df.columns]
+if missing_limit_cols:
+    st.error(
+        "❌ File 2 (Control Limit Data) is missing required columns: "
+        + ", ".join(missing_limit_cols)
+    )
+    st.stop()
+
+# Parse time after upload.
+df_raw["Time"] = pd.to_datetime(df_raw["Time"], errors="coerce")
+df_raw = df_raw.dropna(subset=["Time"])
+
+st.sidebar.success(
+    f"✅ Data loaded\n\n"
+    f"File 1: {uploaded_data_file.name}\n\n"
+    f"File 2: {uploaded_limit_file.name}"
+)
 
 # CRITICAL FIX: Remove NA, NaN, and Empty spaces from Batch Number globally
 df_raw = df_raw.dropna(subset=["製造批號"])
