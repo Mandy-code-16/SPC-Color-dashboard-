@@ -1080,6 +1080,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
     st.markdown("---")
 
     calc_res = {}
+    chart_buffers = {}  # Store Task 3 chart PNG bytes for download + Word report
     dE_std_sq = 0.0
     dE_iqr_sq = 0.0
 
@@ -1277,6 +1278,22 @@ elif app_mode == "🎛️ Control Limit Calculator":
             # plot -> Batch No. labels/X title -> legend
             fig.subplots_adjust(bottom=0.36, right=0.96)
             st.pyplot(fig)
+
+            # Save exactly the displayed chart for PNG download and Word export.
+            chart_png = io.BytesIO()
+            fig.savefig(chart_png, format="png", dpi=220, bbox_inches="tight", facecolor="white")
+            chart_png.seek(0)
+            chart_bytes = chart_png.getvalue()
+            chart_buffers[f] = chart_bytes
+
+            factor_filename = {"ΔL": "DeltaL", "Δa": "Deltaa", "Δb": "Deltab"}.get(f, str(f))
+            st.download_button(
+                label=f"📥 Download {f} Chart (PNG)",
+                data=chart_bytes,
+                file_name=f"Task3_{color}_{factor_filename}_LAB_vs_LINE.png",
+                mime="image/png",
+                key=f"task3_png_{color}_{factor_filename}"
+            )
             plt.close(fig)
 
         with col_table:
@@ -1386,6 +1403,225 @@ elif app_mode == "🎛️ Control Limit Calculator":
             "Use the **Recommended LAB LCL/UCL** as the incoming paint control window. "
             "Continue monitoring the paired LINE output trend. If LINE OOC events remain concentrated at particular LAB zones, "
             "the incoming LAB window should be tightened or shifted using the paired historical relationship rather than treating LAB and LINE separately."
+        )
+
+    # ---------------------------------------------------------
+    # Task 3 Word Report Export
+    # ---------------------------------------------------------
+    if calc_res:
+        st.markdown("---")
+        st.markdown("### 📄 Export Task 3 Word Report")
+        st.caption(
+            "The Word report includes the paired LAB–LINE analysis, calculated incoming LAB limits, "
+            "correlation results, summary table, and the current ΔL / Δa / Δb charts."
+        )
+
+        def build_task3_word_report():
+            doc = docx.Document()
+
+            # Page margins
+            section = doc.sections[0]
+            section.top_margin = Inches(0.65)
+            section.bottom_margin = Inches(0.65)
+            section.left_margin = Inches(0.7)
+            section.right_margin = Inches(0.7)
+
+            # Base font
+            normal_style = doc.styles["Normal"]
+            normal_style.font.name = "Arial"
+            normal_style.font.size = docx.shared.Pt(10)
+
+            title = doc.add_heading("Incoming LAB Control Limit Analysis Report", level=0)
+            title.alignment = 1
+
+            p = doc.add_paragraph()
+            p.add_run("Color Code: ").bold = True
+            p.add_run(str(color))
+            p.add_run("\nAnalysis Date: ").bold = True
+            p.add_run(datetime.now().strftime("%Y-%m-%d %H:%M"))
+
+            if not df.empty:
+                p.add_run("\nData Period: ").bold = True
+                p.add_run(
+                    f"{df['Time'].min().strftime('%Y-%m-%d')} to {df['Time'].max().strftime('%Y-%m-%d')}"
+                )
+                p.add_run("\nTotal filtered batches: ").bold = True
+                p.add_run(str(df["製造批號"].nunique()))
+
+            doc.add_heading("1. Analysis Objective", level=1)
+            doc.add_paragraph(
+                "Determine a practical incoming LAB control range for ΔL, Δa and Δb, and use the paired "
+                "LINE output from the same production batches to evaluate the downstream color trend. "
+                "The recommended LAB range is derived from the overlap between the Standard (Mean ± Kσ) "
+                "and IQR methods using LAB data associated with acceptable LINE output whenever current "
+                "LINE control limits are available."
+            )
+
+            doc.add_heading("2. Analysis Method", level=1)
+            method_table = doc.add_table(rows=1, cols=3)
+            method_table.style = "Table Grid"
+            hdr = method_table.rows[0].cells
+            hdr[0].text = "Method"
+            hdr[1].text = "Calculation"
+            hdr[2].text = "Purpose"
+            method_rows = [
+                ("Standard", "Mean ± K × σ", "Evaluate LAB distribution using mean and standard deviation"),
+                ("IQR", "Q1 − k×IQR to Q3 + k×IQR", "Reduce sensitivity to extreme values"),
+                ("Recommended LAB", "Intersection of Standard and IQR", "Candidate incoming LAB control window"),
+                ("LAB→LINE", "Pearson r and R²", "Evaluate the relationship between incoming LAB and LINE output"),
+            ]
+            for m, calc, purpose in method_rows:
+                cells = method_table.add_row().cells
+                cells[0].text = m
+                cells[1].text = calc
+                cells[2].text = purpose
+
+            doc.add_heading("3. Factor Results", level=1)
+
+            for factor in factors:
+                if factor not in calc_res:
+                    continue
+                res = calc_res[factor]
+                doc.add_heading(f"3.{factors.index(factor)+1} {factor} Analysis", level=2)
+
+                result_table = doc.add_table(rows=1, cols=2)
+                result_table.style = "Table Grid"
+                h = result_table.rows[0].cells
+                h[0].text = "Item"
+                h[1].text = "Result"
+
+                lab_sheet = (
+                    f"{res['lab_lcl_sheet']:.3f} ~ {res['lab_ucl_sheet']:.3f}"
+                    if res['lab_lcl_sheet'] is not None and res['lab_ucl_sheet'] is not None else "Not set"
+                )
+                line_sheet = (
+                    f"{res['line_lcl_sheet']:.3f} ~ {res['line_ucl_sheet']:.3f}"
+                    if res['line_lcl_sheet'] is not None and res['line_ucl_sheet'] is not None else "Not set"
+                )
+                rec = (
+                    f"{res['rec_lcl']:.3f} ~ {res['rec_ucl']:.3f}"
+                    if res['rec_lcl'] is not None and res['rec_ucl'] is not None else "No overlap"
+                )
+                rows = [
+                    ("Current LAB limit", lab_sheet),
+                    ("Current LINE limit", line_sheet),
+                    (f"Standard LAB ({res['sig']:.1f}σ)", f"{res['std_lcl']:.3f} ~ {res['std_ucl']:.3f}"),
+                    (f"IQR LAB (k={res['iqr_k']:.2f})", f"{res['iqr_lcl']:.3f} ~ {res['iqr_ucl']:.3f}"),
+                    ("Recommended LAB", rec),
+                    ("Paired batches", str(len(res['pair']))),
+                    ("LAB data used", str(len(res['safe_lab']))),
+                    ("LAB→LINE r", f"{res['r']:.3f}" if pd.notna(res['r']) else "N/A"),
+                    ("LAB→LINE R²", f"{res['r2']:.3f}" if pd.notna(res['r2']) else "N/A"),
+                ]
+                for item, value in rows:
+                    c = result_table.add_row().cells
+                    c[0].text = item
+                    c[1].text = value
+
+                doc.add_paragraph(res['filter_note'])
+
+                if factor in chart_buffers:
+                    doc.add_picture(io.BytesIO(chart_buffers[factor]), width=Inches(6.6))
+                    cap = doc.add_paragraph(f"Figure: {factor} LAB Input vs LINE Output")
+                    cap.alignment = 1
+
+            if len(calc_res) == 3:
+                doc.add_heading("4. Recommended Incoming LAB Control Limit Summary", level=1)
+                sum_table = doc.add_table(rows=1, cols=8)
+                sum_table.style = "Table Grid"
+                headers = [
+                    "Factor", "Paired n", "LAB n", "Mean", "σ",
+                    "Recommended LCL", "Recommended UCL", "R²"
+                ]
+                for i, htxt in enumerate(headers):
+                    sum_table.rows[0].cells[i].text = htxt
+
+                for factor in factors:
+                    res = calc_res[factor]
+                    row = sum_table.add_row().cells
+                    vals = [
+                        factor,
+                        str(len(res['pair'])),
+                        str(len(res['safe_lab'])),
+                        f"{res['m']:.3f}",
+                        f"{res['s']:.3f}",
+                        f"{res['rec_lcl']:.3f}" if res['rec_lcl'] is not None else "N/A",
+                        f"{res['rec_ucl']:.3f}" if res['rec_ucl'] is not None else "N/A",
+                        f"{res['r2']:.3f}" if pd.notna(res['r2']) else "N/A",
+                    ]
+                    for i, value in enumerate(vals):
+                        row[i].text = value
+
+                # Derived ΔE results, using the same values already calculated in the app.
+                dE_std_report = math.sqrt(dE_std_sq)
+                dE_iqr_report = math.sqrt(dE_iqr_sq)
+                valid_rec = all(
+                    calc_res[f]['rec_lcl'] is not None and calc_res[f]['rec_ucl'] is not None
+                    for f in factors
+                )
+                if valid_rec:
+                    dE_rec_report = math.sqrt(sum(
+                        max(abs(calc_res[f]['rec_lcl']), abs(calc_res[f]['rec_ucl'])) ** 2
+                        for f in factors
+                    ))
+                else:
+                    dE_rec_report = None
+
+                doc.add_heading("5. Derived Incoming LAB ΔE Boundary", level=1)
+                de_table = doc.add_table(rows=1, cols=2)
+                de_table.style = "Table Grid"
+                de_table.rows[0].cells[0].text = "Item"
+                de_table.rows[0].cells[1].text = "Value"
+                de_rows = [
+                    ("Standard-derived ΔE", f"{dE_std_report:.3f}"),
+                    ("IQR-derived ΔE", f"{dE_iqr_report:.3f}"),
+                    ("Recommended ΔE", f"{dE_rec_report:.3f}" if dE_rec_report is not None else "N/A"),
+                    ("Current LAB ΔE target", "≤ 0.500"),
+                ]
+                for item, value in de_rows:
+                    c = de_table.add_row().cells
+                    c[0].text = item
+                    c[1].text = value
+
+                doc.add_heading("6. Conclusion", level=1)
+                conclusion_parts = []
+                for factor in factors:
+                    res = calc_res[factor]
+                    if res['rec_lcl'] is not None and res['rec_ucl'] is not None:
+                        conclusion_parts.append(
+                            f"{factor}: recommended incoming LAB range {res['rec_lcl']:.3f} to {res['rec_ucl']:.3f}"
+                        )
+                if conclusion_parts:
+                    doc.add_paragraph(
+                        "Based on the current paired historical data, " + "; ".join(conclusion_parts) + ". "
+                        "These ranges should be treated as candidate incoming control limits and continuously verified "
+                        "against future LINE output stability as more paired batches become available."
+                    )
+                else:
+                    doc.add_paragraph(
+                        "A complete recommended incoming LAB range could not be established for all factors from the "
+                        "current data. Additional paired LAB and LINE data are required before finalizing the incoming limits."
+                    )
+
+            # Footer
+            for sec in doc.sections:
+                footer = sec.footer.paragraphs[0]
+                footer.text = "SPC Color Dashboard - Task 3 Incoming LAB Control Limit Analysis"
+                footer.alignment = 1
+
+            report_buf = io.BytesIO()
+            doc.save(report_buf)
+            report_buf.seek(0)
+            return report_buf.getvalue()
+
+        task3_word_bytes = build_task3_word_report()
+        safe_color_name = re.sub(r"[^A-Za-z0-9_-]+", "_", str(color))
+        st.download_button(
+            label="📄 Download Word Report",
+            data=task3_word_bytes,
+            file_name=f"Task3_Incoming_LAB_Control_Limit_{safe_color_name}_{datetime.now().strftime('%Y%m%d')}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            key=f"task3_word_{safe_color_name}"
         )
 
     # ---------------------------------------------------------
