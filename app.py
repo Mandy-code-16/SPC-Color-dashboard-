@@ -1138,6 +1138,63 @@ elif app_mode == "🎛️ Control Limit Calculator":
     factors = ["ΔL", "Δa", "Δb"]
 
     # ---------------------------------------------------------
+    # Task 3 summary table: LAB input / LINE output statistics
+    # Control limits shown here use fixed x̄ ± 1.5σ, matching the report format.
+    # ---------------------------------------------------------
+    st.markdown("### 📋 LAB / LINE 色差統計與 ±1.5σ 管制界限")
+    st.caption(
+        "以各製造批號之平均值計算 Min、Max、平均值 (x̄)、標準差 (σ)，"
+        "並以 x̄ ± 1.5σ 計算 LCL / UCL。"
+    )
+
+    summary_sigma_k = 1.5
+    task3_stats_rows = []
+
+    for _f in factors:
+        for _source_key, _source_zh in [("lab", "入料"), ("line", "產出")]:
+            _vals = pd.to_numeric(
+                spc_data[_f][_source_key]["value"], errors="coerce"
+            ).dropna()
+
+            if len(_vals) > 0:
+                _min = _vals.min()
+                _max = _vals.max()
+                _mean = _vals.mean()
+                _std = _vals.std()
+                if pd.isna(_std):
+                    _std = 0.0
+                _lcl = _mean - summary_sigma_k * _std
+                _ucl = _mean + summary_sigma_k * _std
+            else:
+                _min = _max = _mean = _std = _lcl = _ucl = np.nan
+
+            task3_stats_rows.append({
+                "入料 / 產出色差走向": f"{delta_label(_f)}{_source_zh}",
+                "Min": _min,
+                "Max": _max,
+                "平均值 (x̄)": _mean,
+                "標準差 (σ)": _std,
+                "LCL (-1.5σ)": _lcl,
+                "UCL (+1.5σ)": _ucl,
+            })
+
+    task3_stats_df = pd.DataFrame(task3_stats_rows)
+    st.dataframe(
+        task3_stats_df.style.format({
+            "Min": "{:.3f}",
+            "Max": "{:.3f}",
+            "平均值 (x̄)": "{:.3f}",
+            "標準差 (σ)": "{:.3f}",
+            "LCL (-1.5σ)": "{:.3f}",
+            "UCL (+1.5σ)": "{:.3f}",
+        }, na_rep="-"),
+        hide_index=True,
+        use_container_width=True,
+    )
+
+    st.markdown("---")
+
+    # ---------------------------------------------------------
     # Build paired LAB + LINE batch-level dataset
     # ---------------------------------------------------------
     paired_all = None
@@ -1569,7 +1626,28 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 "LINE control limits are available."
             )
 
-            doc.add_heading("2. Analysis Method", level=1)
+            doc.add_heading("2. LAB / LINE Statistical Summary (±1.5σ)", level=1)
+            doc.add_paragraph(
+                "Min, Max, mean (x̄), standard deviation (σ), and control limits are calculated at batch level. "
+                "LCL/UCL in this table are defined as x̄ ± 1.5σ."
+            )
+            stats_table = doc.add_table(rows=1, cols=7)
+            stats_table.style = "Table Grid"
+            stats_headers = [
+                "入料 / 產出色差走向", "Min", "Max", "平均值 (x̄)", "標準差 (σ)",
+                "LCL (-1.5σ)", "UCL (+1.5σ)"
+            ]
+            for _i, _h in enumerate(stats_headers):
+                stats_table.rows[0].cells[_i].text = _h
+
+            for _, _r in task3_stats_df.iterrows():
+                _cells = stats_table.add_row().cells
+                _cells[0].text = str(_r["入料 / 產出色差走向"])
+                for _j, _col in enumerate(stats_headers[1:], start=1):
+                    _val = _r[_col]
+                    _cells[_j].text = f"{float(_val):.3f}" if pd.notna(_val) else "-"
+
+            doc.add_heading("3. Analysis Method", level=1)
             method_table = doc.add_table(rows=1, cols=3)
             method_table.style = "Table Grid"
             hdr = method_table.rows[0].cells
@@ -1588,13 +1666,13 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 cells[1].text = calc
                 cells[2].text = purpose
 
-            doc.add_heading("3. Factor Results", level=1)
+            doc.add_heading("4. Factor Results", level=1)
 
             for factor in factors:
                 if factor not in calc_res:
                     continue
                 res = calc_res[factor]
-                doc.add_heading(f"3.{factors.index(factor)+1} {factor} Analysis", level=2)
+                doc.add_heading(f"4.{factors.index(factor)+1} {delta_label(factor)} Analysis", level=2)
 
                 result_table = doc.add_table(rows=1, cols=2)
                 result_table.style = "Table Grid"
@@ -1638,7 +1716,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
                     cap.alignment = 1
 
             if len(calc_res) == 3:
-                doc.add_heading("4. Recommended Incoming LAB Control Limit Summary", level=1)
+                doc.add_heading("5. Recommended Incoming LAB Control Limit Summary", level=1)
                 sum_table = doc.add_table(rows=1, cols=8)
                 sum_table.style = "Table Grid"
                 headers = [
@@ -1679,7 +1757,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 else:
                     dE_rec_report = None
 
-                doc.add_heading("5. Derived Incoming LAB ΔE* Boundary", level=1)
+                doc.add_heading("6. Derived Incoming LAB ΔE* Boundary", level=1)
                 de_table = doc.add_table(rows=1, cols=2)
                 de_table.style = "Table Grid"
                 de_table.rows[0].cells[0].text = "Item"
@@ -1695,7 +1773,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
                     c[0].text = item
                     c[1].text = value
 
-                doc.add_heading("6. Conclusion", level=1)
+                doc.add_heading("7. Conclusion", level=1)
                 conclusion_parts = []
                 for factor in factors:
                     res = calc_res[factor]
