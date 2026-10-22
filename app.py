@@ -1292,10 +1292,13 @@ elif app_mode == "🎛️ Control Limit Calculator":
     chart_buffers = {}  # Store Task 3 chart PNG bytes for download + Word report
     dE_std_sq = 0.0
     dE_iqr_sq = 0.0
+    dE_line_std_sq = 0.0
+    dE_line_iqr_sq = 0.0
 
     for f in factors:
         st.markdown(f"## 📊 {delta_label(f)}: LAB Input vs LINE Output")
 
+        st.markdown("#### 🔵 LAB Input Control Limit Settings")
         col_sig, col_iqr = st.columns(2)
         with col_sig:
             sig = st.number_input(
@@ -1310,6 +1313,23 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 value=1.5,
                 step=0.1,
                 key=f"paired_iqr_{f}"
+            )
+
+        st.markdown("#### 🟠 LINE Output Control Limit Settings")
+        col_line_sig, col_line_iqr = st.columns(2)
+        with col_line_sig:
+            line_sig = st.number_input(
+                f"Sigma (K) for LINE output {delta_label(f)}",
+                value=3.0,
+                step=0.1,
+                key=f"paired_line_sig_{f}"
+            )
+        with col_line_iqr:
+            line_iqr_k = st.number_input(
+                f"IQR sensitivity for LINE output {delta_label(f)}",
+                value=1.5,
+                step=0.1,
+                key=f"paired_line_iqr_{f}"
             )
 
         if paired_all.empty:
@@ -1369,6 +1389,22 @@ elif app_mode == "🎛️ Control Limit Calculator":
         rec_ucl = min(std_ucl, iqr_ucl)
         has_overlap = rec_lcl <= rec_ucl
 
+        # LINE output control limits are calculated independently from all paired LINE values.
+        line_values = pair_f["LINE"].dropna()
+        line_m = line_values.mean()
+        line_s = line_values.std()
+        line_q1 = line_values.quantile(0.25)
+        line_q3 = line_values.quantile(0.75)
+        line_median = line_values.median()
+
+        line_std_lcl = line_m - line_sig * line_s
+        line_std_ucl = line_m + line_sig * line_s
+        line_iqr_lcl = line_q1 - line_iqr_k * (line_q3 - line_q1)
+        line_iqr_ucl = line_q3 + line_iqr_k * (line_q3 - line_q1)
+        line_rec_lcl = max(line_std_lcl, line_iqr_lcl)
+        line_rec_ucl = min(line_std_ucl, line_iqr_ucl)
+        line_has_overlap = line_rec_lcl <= line_rec_ucl
+
         r = pair_f["LAB"].corr(pair_f["LINE"]) if len(pair_f) >= 2 else np.nan
         r2 = r ** 2 if pd.notna(r) else np.nan
 
@@ -1390,6 +1426,17 @@ elif app_mode == "🎛️ Control Limit Calculator":
             "iqr_ucl": iqr_ucl,
             "rec_lcl": rec_lcl if has_overlap else None,
             "rec_ucl": rec_ucl if has_overlap else None,
+            "line_m": line_m,
+            "line_s": line_s,
+            "line_median": line_median,
+            "line_sig": line_sig,
+            "line_iqr_k": line_iqr_k,
+            "line_std_lcl": line_std_lcl,
+            "line_std_ucl": line_std_ucl,
+            "line_iqr_lcl": line_iqr_lcl,
+            "line_iqr_ucl": line_iqr_ucl,
+            "line_rec_lcl": line_rec_lcl if line_has_overlap else None,
+            "line_rec_ucl": line_rec_ucl if line_has_overlap else None,
             "r": r,
             "r2": r2,
             "filter_note": filter_note,
@@ -1397,6 +1444,8 @@ elif app_mode == "🎛️ Control Limit Calculator":
 
         dE_std_sq += max(abs(std_lcl), abs(std_ucl)) ** 2
         dE_iqr_sq += max(abs(iqr_lcl), abs(iqr_ucl)) ** 2
+        dE_line_std_sq += max(abs(line_std_lcl), abs(line_std_ucl)) ** 2
+        dE_line_iqr_sq += max(abs(line_iqr_lcl), abs(line_iqr_ucl)) ** 2
 
         # -----------------------------------------------------
         # Combined LAB + LINE chart
@@ -1443,9 +1492,14 @@ elif app_mode == "🎛️ Control Limit Calculator":
 
             # Candidate incoming LAB range is the main output of this task.
             if has_overlap:
-                ax.axhspan(rec_lcl, rec_ucl, color="#dbeafe", alpha=0.35, label="Recommended LAB")
+                ax.axhspan(rec_lcl, rec_ucl, color="#dbeafe", alpha=0.28, label="Recommended LAB")
                 ax.axhline(rec_lcl, color="#2563eb", linestyle=":", linewidth=1.4)
                 ax.axhline(rec_ucl, color="#2563eb", linestyle=":", linewidth=1.4)
+
+            if line_has_overlap:
+                ax.axhspan(line_rec_lcl, line_rec_ucl, color="#ffedd5", alpha=0.22, label="Recommended LINE")
+                ax.axhline(line_rec_lcl, color="#ed7d31", linestyle=":", linewidth=1.3)
+                ax.axhline(line_rec_ucl, color="#ed7d31", linestyle=":", linewidth=1.3)
 
             if lab_lcl_sheet is not None and lab_ucl_sheet is not None:
                 ax.axhline(lab_lcl_sheet, color="#7f7f7f", linestyle="-.", linewidth=1.0, label="LAB LCL/UCL")
@@ -1515,13 +1569,17 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 if line_lcl_sheet is not None and line_ucl_sheet is not None else "Not set"
             )
             rec_txt = f"{rec_lcl:.3f} ~ {rec_ucl:.3f}" if has_overlap else "No overlap"
+            line_rec_txt = f"{line_rec_lcl:.3f} ~ {line_rec_ucl:.3f}" if line_has_overlap else "No overlap"
 
             result_table = pd.DataFrame([
                 {"Item": "Current LAB limit", "Range / Value": current_lab},
-                {"Item": "Current LINE limit", "Range / Value": current_line},
                 {"Item": f"Standard LAB ({sig:.1f}σ)", "Range / Value": f"{std_lcl:.3f} ~ {std_ucl:.3f}"},
                 {"Item": f"IQR LAB (k={iqr_k:.1f})", "Range / Value": f"{iqr_lcl:.3f} ~ {iqr_ucl:.3f}"},
                 {"Item": "Recommended LAB", "Range / Value": rec_txt},
+                {"Item": "Current LINE limit", "Range / Value": current_line},
+                {"Item": f"Standard LINE ({line_sig:.1f}σ)", "Range / Value": f"{line_std_lcl:.3f} ~ {line_std_ucl:.3f}"},
+                {"Item": f"IQR LINE (k={line_iqr_k:.1f})", "Range / Value": f"{line_iqr_lcl:.3f} ~ {line_iqr_ucl:.3f}"},
+                {"Item": "Recommended LINE", "Range / Value": line_rec_txt},
                 {"Item": "Paired batches", "Range / Value": str(len(pair_f))},
                 {"Item": "LAB data used", "Range / Value": str(len(safe_lab))},
                 {"Item": "LAB→LINE r", "Range / Value": f"{r:.3f}" if pd.notna(r) else "N/A"},
@@ -1544,7 +1602,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
     # Three-factor incoming LAB control-limit summary
     # ---------------------------------------------------------
     if len(calc_res) == 3:
-        st.markdown("### 📋 Recommended Incoming LAB Control Limits")
+        st.markdown("### 📋 Recommended LAB / LINE Control Limits")
 
         summary_rows = []
         recommendation_valid = True
@@ -1570,6 +1628,10 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 "IQR UCL": round(res["iqr_ucl"], 3),
                 "Recommended LAB LCL": round(res["rec_lcl"], 3) if has_rec else None,
                 "Recommended LAB UCL": round(res["rec_ucl"], 3) if has_rec else None,
+                "LINE Mean": round(res["line_m"], 3),
+                "LINE σ": round(res["line_s"], 3),
+                "Recommended LINE LCL": round(res["line_rec_lcl"], 3) if res["line_rec_lcl"] is not None else None,
+                "Recommended LINE UCL": round(res["line_rec_ucl"], 3) if res["line_rec_ucl"] is not None else None,
                 "LAB→LINE r": round(res["r"], 3) if pd.notna(res["r"]) else None,
                 "LAB→LINE R²": round(res["r2"], 3) if pd.notna(res["r2"]) else None,
             })
@@ -1577,13 +1639,23 @@ elif app_mode == "🎛️ Control Limit Calculator":
         incoming_summary = pd.DataFrame(summary_rows)
         st.dataframe(incoming_summary, hide_index=True, use_container_width=True)
         st.caption(
-            "Recommended LAB limits are the intersection of Mean ± Kσ and IQR limits calculated from "
-            "incoming LAB values associated with acceptable LINE outputs whenever current LINE limits are available."
+            "Recommended LAB limits are derived from incoming LAB values (using LINE-in-control batches when existing LINE limits are available). "
+            "Recommended LINE limits are calculated independently from the paired LINE output distribution. Both use the intersection of Mean ± Kσ and IQR."
         )
 
         dE_std = math.sqrt(dE_std_sq)
         dE_iqr = math.sqrt(dE_iqr_sq)
         dE_rec = math.sqrt(dE_rec_sq) if recommendation_valid else None
+        dE_line_std = math.sqrt(dE_line_std_sq)
+        dE_line_iqr = math.sqrt(dE_line_iqr_sq)
+        line_rec_valid = all(
+            calc_res[_f]["line_rec_lcl"] is not None and calc_res[_f]["line_rec_ucl"] is not None
+            for _f in factors
+        )
+        dE_line_rec = math.sqrt(sum(
+            max(abs(calc_res[_f]["line_rec_lcl"]), abs(calc_res[_f]["line_rec_ucl"])) ** 2
+            for _f in factors
+        )) if line_rec_valid else None
 
         # Existing project target for incoming LAB color difference.
         lab_de_target = 0.5
@@ -1607,11 +1679,17 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 f"above the current LAB target {lab_de_target}. Further tightening should be reviewed."
             )
 
+        st.markdown("### 🟠 LINE Output ΔE* Boundary")
+        lc1, lc2, lc3 = st.columns(3)
+        lc1.metric("LINE Standard-derived ΔE*", f"{dE_line_std:.3f}")
+        lc2.metric("LINE IQR-derived ΔE*", f"{dE_line_iqr:.3f}")
+        lc3.metric("LINE Recommended ΔE*", f"{dE_line_rec:.3f}" if dE_line_rec is not None else "N/A")
+
         st.markdown("### 💡 How to use this result")
         st.info(
-            "Use the **Recommended LAB LCL/UCL** as the incoming paint control window. "
-            "Continue monitoring the paired LINE output trend. If LINE OOC events remain concentrated at particular LAB zones, "
-            "the incoming LAB window should be tightened or shifted using the paired historical relationship rather than treating LAB and LINE separately."
+            "Use the **Recommended LAB LCL/UCL** as the incoming paint control window, and use the **Recommended LINE LCL/UCL** "
+            "as the output process-monitoring window. Continue monitoring paired LAB→LINE behavior. If LINE OOC events remain concentrated "
+            "at particular LAB zones, tighten or shift the LAB window based on the paired historical relationship."
         )
 
     # ---------------------------------------------------------
@@ -1621,7 +1699,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
         st.markdown("---")
         st.markdown("### 📄 Export Task 3 Word Report")
         st.caption(
-            "The Word report includes the paired LAB–LINE analysis, calculated incoming LAB limits, "
+            "The Word report includes the paired LAB–LINE analysis, calculated LAB input and LINE output control limits, "
             "correlation results, summary table, and the current ΔL* / Δa* / Δb* charts."
         )
 
@@ -1697,7 +1775,8 @@ elif app_mode == "🎛️ Control Limit Calculator":
             method_rows = [
                 ("Standard", "Mean ± K × σ", "Evaluate LAB distribution using mean and standard deviation"),
                 ("IQR", "Q1 − k×IQR to Q3 + k×IQR", "Reduce sensitivity to extreme values"),
-                ("Recommended LAB", "Intersection of Standard and IQR", "Candidate incoming LAB control window"),
+                ("Recommended LAB", "Intersection of LAB Standard and LAB IQR", "Candidate incoming LAB control window"),
+                ("Recommended LINE", "Intersection of LINE Standard and LINE IQR", "Candidate output process control window"),
                 ("LAB→LINE", "Pearson r and R²", "Evaluate the relationship between incoming LAB and LINE output"),
             ]
             for m, calc, purpose in method_rows:
@@ -1732,12 +1811,19 @@ elif app_mode == "🎛️ Control Limit Calculator":
                     f"{res['rec_lcl']:.3f} ~ {res['rec_ucl']:.3f}"
                     if res['rec_lcl'] is not None and res['rec_ucl'] is not None else "No overlap"
                 )
+                line_rec = (
+                    f"{res['line_rec_lcl']:.3f} ~ {res['line_rec_ucl']:.3f}"
+                    if res['line_rec_lcl'] is not None and res['line_rec_ucl'] is not None else "No overlap"
+                )
                 rows = [
                     ("Current LAB limit", lab_sheet),
-                    ("Current LINE limit", line_sheet),
                     (f"Standard LAB ({res['sig']:.1f}σ)", f"{res['std_lcl']:.3f} ~ {res['std_ucl']:.3f}"),
                     (f"IQR LAB (k={res['iqr_k']:.2f})", f"{res['iqr_lcl']:.3f} ~ {res['iqr_ucl']:.3f}"),
                     ("Recommended LAB", rec),
+                    ("Current LINE limit", line_sheet),
+                    (f"Standard LINE ({res['line_sig']:.1f}σ)", f"{res['line_std_lcl']:.3f} ~ {res['line_std_ucl']:.3f}"),
+                    (f"IQR LINE (k={res['line_iqr_k']:.2f})", f"{res['line_iqr_lcl']:.3f} ~ {res['line_iqr_ucl']:.3f}"),
+                    ("Recommended LINE", line_rec),
                     ("Paired batches", str(len(res['pair']))),
                     ("LAB data used", str(len(res['safe_lab']))),
                     ("LAB→LINE r", f"{res['r']:.3f}" if pd.notna(res['r']) else "N/A"),
@@ -1756,12 +1842,12 @@ elif app_mode == "🎛️ Control Limit Calculator":
                     cap.alignment = 1
 
             if len(calc_res) == 3:
-                doc.add_heading("5. Recommended Incoming LAB Control Limit Summary", level=1)
-                sum_table = doc.add_table(rows=1, cols=8)
+                doc.add_heading("5. Recommended LAB / LINE Control Limit Summary", level=1)
+                sum_table = doc.add_table(rows=1, cols=10)
                 sum_table.style = "Table Grid"
                 headers = [
-                    "Factor", "Paired n", "LAB n", "Mean", "σ",
-                    "Recommended LCL", "Recommended UCL", "R²"
+                    "Factor", "Paired n", "LAB Mean", "LAB σ", "LAB LCL", "LAB UCL",
+                    "LINE Mean", "LINE σ", "LINE LCL", "LINE UCL"
                 ]
                 for i, htxt in enumerate(headers):
                     sum_table.rows[0].cells[i].text = htxt
@@ -1772,12 +1858,14 @@ elif app_mode == "🎛️ Control Limit Calculator":
                     vals = [
                         factor,
                         str(len(res['pair'])),
-                        str(len(res['safe_lab'])),
                         f"{res['m']:.3f}",
                         f"{res['s']:.3f}",
                         f"{res['rec_lcl']:.3f}" if res['rec_lcl'] is not None else "N/A",
                         f"{res['rec_ucl']:.3f}" if res['rec_ucl'] is not None else "N/A",
-                        f"{res['r2']:.3f}" if pd.notna(res['r2']) else "N/A",
+                        f"{res['line_m']:.3f}",
+                        f"{res['line_s']:.3f}",
+                        f"{res['line_rec_lcl']:.3f}" if res['line_rec_lcl'] is not None else "N/A",
+                        f"{res['line_rec_ucl']:.3f}" if res['line_rec_ucl'] is not None else "N/A",
                     ]
                     for i, value in enumerate(vals):
                         row[i].text = value
