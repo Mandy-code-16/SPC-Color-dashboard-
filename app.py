@@ -1,0 +1,2213 @@
+import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+import io
+import numpy as np
+import math
+import re
+import docx
+from docx.shared import Inches
+from datetime import datetime
+
+# =========================
+# PAGE CONFIG
+# =========================
+st.set_page_config(
+    page_title="SPC Color Dashboard",
+    page_icon="📊",
+    layout="wide"
+)
+
+st.markdown(
+    """
+    <style>
+    .stApp {
+        background: linear-gradient(270deg, #ffffff, #f0f9ff, #e0f2fe, #fef3c7, #ecfeff);
+        background-size: 800% 800%;
+        animation: gradientBG 20s ease infinite;
+    }
+    @keyframes gradientBG {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+if st.button("🔄 Refresh data"):
+    st.cache_data.clear()
+    st.rerun()
+
+st.markdown("""<style>[data-testid="stSidebar"] {background-color: #f6f8fa;}</style>""", unsafe_allow_html=True)
+
+# =========================
+# GOOGLE SHEET LINKS
+# =========================
+DATA_URL = "https://docs.google.com/spreadsheets/d/1lqsLKSoDTbtvAsHzJaEri8tPo5pA3vqJ__LVHp2R534/export?format=csv"
+LIMIT_URL = "https://docs.google.com/spreadsheets/d/1jbP8puBraQ5Xgs9oIpJ7PlLpjIK3sltrgbrgKUcJ-Qo/export?format=csv"
+
+# =========================
+# LOAD DATA & CLEANING
+# =========================
+@st.cache_data(ttl=300)
+def load_data():
+    df = pd.read_csv(DATA_URL)
+    df["Time"] = pd.to_datetime(df["Time"])
+    return df
+
+@st.cache_data(ttl=300)
+def load_limit():
+    return pd.read_csv(LIMIT_URL)
+
+df_raw = load_data()
+limit_df = load_limit()
+
+# Clean column names
+df_raw.columns = df_raw.columns.str.replace("\r\n", " ", regex=False).str.replace("\n", " ", regex=False).str.replace("　", " ", regex=False).str.replace(r"\s+", " ", regex=True).str.strip()
+limit_df.columns = limit_df.columns.str.replace("\r\n", " ", regex=False).str.replace("\n", " ", regex=False).str.replace("　", " ", regex=False).str.replace(r"\s+", " ", regex=True).str.strip()
+
+# CRITICAL FIX: Remove NA, NaN, and Empty spaces from Batch Number globally
+df_raw = df_raw.dropna(subset=["製造批號"])
+df_raw["製造批號"] = df_raw["製造批號"].astype(str).str.strip()
+df_raw = df_raw[df_raw["製造批號"] != ""]
+df_raw = df_raw[df_raw["製造批號"].str.lower() != "nan"]
+
+numeric_columns = [
+    "入料檢測 ΔL 正面", "入料檢測 Δa 正面", "入料檢測 Δb 正面",
+    "正-北 ΔL", "正-南 ΔL", "正-北 Δa", "正-南 Δa", "正-北 Δb", "正-南 Δb",
+    "Avergage Thickness", "Average value ΔE 正面", "Average value ΔL 正面", 
+    "Average value Δa 正面", "Average value Δb 正面"
+]
+for col in numeric_columns:
+    if col in df_raw.columns:
+        df_raw[col] = pd.to_numeric(df_raw[col], errors='coerce')
+
+# =========================
+# HELPER FUNCTIONS
+# =========================
+def safe_get_limit(c_code, src, fac):
+    try:
+        c_search = str(c_code).strip().upper()
+        match_idx = -1
+        if "Color_code" in limit_df.columns:
+            for idx, val in limit_df["Color_code"].items():
+                if str(val).strip().upper() == c_search:
+                    match_idx = idx
+                    break
+        if match_idx == -1: return None, None
+        
+        row = limit_df.iloc[[match_idx]]
+        src_up = str(src).strip().upper()
+        fac1 = str(fac).strip().upper()
+        fac2 = fac1.replace("Δ", "DELTA ")
+        
+        lcl, ucl = None, None
+        for col in row.columns:
+            cup = str(col).strip().upper()
+            if src_up in cup and (fac1 in cup or fac2 in cup):
+                val = row[col].values[0]
+                try:
+                    num = float(val)
+                    if not pd.isna(num):
+                        if "LCL" in cup: lcl = num
+                        if "UCL" in cup: ucl = num
+                except: pass
+        return lcl, ucl
+    except:
+        return None, None
+
+def get_kpi_control_limit_exact(c_code, src, fac):
+    """
+    KPI-report-only control-limit resolver.
+    Existing tasks continue using safe_get_limit() unchanged.
+    """
+    try:
+        if "Color_code" not in limit_df.columns:
+            return None, None, None, None
+
+        c_search = str(c_code).strip().upper()
+        row = limit_df[
+            limit_df["Color_code"].astype(str).str.strip().str.upper() == c_search
+        ]
+        if row.empty:
+            return None, None, None, None
+
+        src_up = str(src).strip().upper()
+        fac_up = str(fac).strip().upper()
+        factor_aliases = {
+            "ΔL": ["ΔL", "DELTA L", "DELTA_L", "DELTAL"],
+            "ΔA": ["ΔA", "DELTA A", "DELTA_A", "DELTAA"],
+            "ΔB": ["ΔB", "DELTA B", "DELTA_B", "DELTAB"],
+        }
+        aliases = factor_aliases.get(fac_up, [fac_up, fac_up.replace("Δ", "DELTA ")])
+
+        def normalize(s):
+            s = str(s).upper().replace("　", " ")
+            s = re.sub(r"[\-_:/()\[\]]+", " ", s)
+            s = re.sub(r"\s+", " ", s).strip()
+            return s
+
+        def has_token(norm_name, token):
+            return re.search(rf"(?:^|\s){re.escape(token)}(?:$|\s)", norm_name) is not None
+
+        candidates = {"LCL": [], "UCL": []}
+        for col in row.columns:
+            norm = normalize(col)
+            if not has_token(norm, src_up):
+                continue
+            if not any(normalize(a) in norm for a in aliases):
+                continue
+            for kind in ["LCL", "UCL"]:
+                if has_token(norm, kind):
+                    try:
+                        val = float(row[col].iloc[0])
+                        if not pd.isna(val):
+                            candidates[kind].append((col, val, len(norm)))
+                    except Exception:
+                        pass
+
+        def choose(items):
+            if not items:
+                return None, None
+            items = sorted(items, key=lambda x: (x[2], str(x[0])))
+            return items[0][1], items[0][0]
+
+        lcl, lcl_col = choose(candidates["LCL"])
+        ucl, ucl_col = choose(candidates["UCL"])
+        return lcl, ucl, lcl_col, ucl_col
+    except Exception:
+        return None, None, None, None
+
+def get_control_batch(color):
+    c_search = str(color).strip().upper()
+    mask = limit_df["Color_code"].astype(str).str.strip().str.upper() == c_search
+    row = limit_df[mask]
+    if row.empty: return None
+    value = row["Control_batch"].values[0]
+    if pd.isna(value): return None
+    if isinstance(value, str):
+        m = re.search(r"\d+", value)
+        if m: return int(m.group())
+    try: return int(float(value))
+    except: return None
+
+def get_control_batch_code(df_unfiltered, control_batch):
+    if control_batch is None or df_unfiltered.empty: return None
+    batch_order = df_unfiltered.sort_values("Time")["製造批號"].drop_duplicates().tolist()
+    if 1 <= control_batch <= len(batch_order): 
+        return batch_order[control_batch - 1]
+    return None
+
+def detect_out_of_control(spc_df, lcl, ucl):
+    mean = spc_df["value"].mean()
+    std = spc_df["value"].std()
+    result = spc_df.copy()
+    result["Rule_CL"] = False
+    result["Rule_3Sigma"] = False
+    if lcl is not None and ucl is not None:
+        result["Rule_CL"] = ((result["value"] < lcl) | (result["value"] > ucl))
+    if std > 0:
+        result["Rule_3Sigma"] = ((result["value"] > mean + 3 * std) | (result["value"] < mean - 3 * std))
+    result["Out_of_Control"] = (result["Rule_CL"] | result["Rule_3Sigma"])
+    return result[result["Out_of_Control"]]
+
+def calculate_batch_averages(df_filtered_color):
+    res = {}
+    for f in ["ΔL", "Δa", "Δb"]:
+        tmp = df_filtered_color.copy()
+        
+        # Calculate LINE average
+        col_n, col_s = f"正-北 {f}", f"正-南 {f}"
+        tmp[col_n] = pd.to_numeric(tmp[col_n], errors='coerce')
+        tmp[col_s] = pd.to_numeric(tmp[col_s], errors='coerce')
+        tmp["row_avg"] = tmp[[col_n, col_s]].mean(axis=1)
+        line_b = tmp.groupby("製造批號", as_index=False).agg({"Time": "min", "row_avg": "mean"}).rename(columns={"row_avg": "value"}).sort_values("Time").dropna()
+        
+        # Calculate LAB average
+        col_lab = f"入料檢測 {f} 正面"
+        tmp[col_lab] = pd.to_numeric(tmp[col_lab], errors='coerce')
+        lab_b = tmp.groupby("製造批號", as_index=False).agg({"Time": "min", col_lab: "mean"}).rename(columns={col_lab: "value"}).sort_values("Time").dropna()
+        
+        # CRITICAL FIX: Enforce Strict 1:1 Intersection
+        common_batches = set(line_b["製造批號"]).intersection(set(lab_b["製造批號"]))
+        line_b = line_b[line_b["製造批號"].isin(common_batches)]
+        lab_b = lab_b[lab_b["製造批號"].isin(common_batches)]
+        
+        res[f] = {"line": line_b, "lab": lab_b}
+    return res
+
+# =========================
+# SIDEBAR – NAVIGATION
+# =========================
+st.sidebar.markdown("### 📊 View Mode")
+app_mode = st.sidebar.radio(
+    "Select View Mode",
+    [
+        "🚀 Main Dashboard", 
+        "📋 Limit Status Summary", 
+        "🎛️ Control Limit Calculator",
+        "🔬 Lab vs Line Scale-up",
+        "📄 AI OOC Word Report",
+        "📈 I-MR Chart (Coil-Level)" # THÊM DÒNG NÀY VÀO MENU
+        ,"🎯 KPI Achievement Report"
+    ],
+    label_visibility="collapsed"
+)
+
+st.sidebar.divider()
+st.sidebar.title("🎨 Filter")
+color = st.sidebar.selectbox("Color code", sorted(df_raw["塗料編號"].dropna().unique()), key="sidebar_color")
+
+df_color = df_raw[df_raw["塗料編號"] == color].copy()
+
+# Synchronized Timeline
+global_batch_order = df_color.sort_values("Time")["製造批號"].drop_duplicates().tolist()
+control_batch = get_control_batch(color)
+control_batch_code = get_control_batch_code(df_color, control_batch)
+control_time = df_color[df_color["製造批號"] == control_batch_code]["Time"].min() if control_batch_code else None
+
+all_years = sorted(df_color["Time"].dt.year.dropna().astype(int).unique())
+selected_years = st.sidebar.multiselect("📅 Year (Leave empty for ALL)", options=all_years, default=[], key="sidebar_year")
+
+all_months = sorted(df_color["Time"].dt.month.dropna().astype(int).unique())
+selected_months = st.sidebar.multiselect("📅 Month (optional)", options=all_months, default=[], key="sidebar_month")
+
+df = df_color.copy()
+if len(selected_years) > 0: df = df[df["Time"].dt.year.isin(selected_years)]
+if len(selected_months) > 0: df = df[df["Time"].dt.month.isin(selected_months)]
+
+spc_data = calculate_batch_averages(df)
+
+# =========================================================
+# PLOTTING CORE ENGINES
+# =========================================================
+def spc_combined(lab, line, title, lab_lim, line_lim, control_batch_code, glb_order):
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.set_facecolor('#f2f2f2')
+
+    valid_batches = set(lab["製造批號"]).intersection(set(line["製造批號"]))
+    local_order = [b for b in glb_order if b in valid_batches]
+
+    lab_dict = dict(zip(lab["製造批號"], lab["value"]))
+    line_dict = dict(zip(line["製造批號"], line["value"]))
+
+    lab_x, lab_y = [], []
+    line_x, line_y = [], []
+
+    for i, b in enumerate(local_order):
+        if b in lab_dict and b in line_dict:
+            lab_x.append(i)
+            lab_y.append(lab_dict[b])
+            line_x.append(i)
+            line_y.append(line_dict[b])
+
+    if lab_x: ax.plot(lab_x, lab_y, marker="^", color="#548235", linestyle="-", linewidth=1.5, markersize=8, label="LAB Input")
+    if line_x: ax.plot(line_x, line_y, marker="o", color="#ffc000", linestyle="-", linewidth=1.5, markersize=8, markerfacecolor="white", markeredgewidth=2, label="LINE Output")
+
+    import matplotlib.transforms as transforms
+    trans = transforms.blended_transform_factory(ax.transData, ax.transAxes)
+
+    if control_batch_code is not None and control_batch_code in glb_order:
+        global_ctrl_idx = glb_order.index(control_batch_code)
+        ctrl_x = None
+        for i, b in enumerate(local_order):
+            if glb_order.index(b) >= global_ctrl_idx:
+                ctrl_x = i
+                break
+        
+        if ctrl_x is not None:
+            ax.axvline(x=ctrl_x, color="#000000", linestyle=(0, (3, 3)), linewidth=1.5)
+            ax.text(ctrl_x, 1.02, "  After Control", color="#0070c0", fontsize=14, ha="left", va="bottom", transform=trans)
+            ax.text(ctrl_x, 1.02, "Before Control  ", color="#0070c0", fontsize=14, ha="right", va="bottom", transform=trans)
+
+    if lab_lim[0] is not None and lab_lim[1] is not None and len(lab_y) > 0:
+        lab_y_arr = np.array(lab_y); lab_x_arr = np.array(lab_x)
+        out_lab = (lab_y_arr > lab_lim[1]) | (lab_y_arr < lab_lim[0])
+        if out_lab.any(): ax.plot(lab_x_arr[out_lab], lab_y_arr[out_lab], marker="^", color="red", linestyle="None", markersize=10, zorder=5)
+    
+    if line_lim[0] is not None and line_lim[1] is not None and len(line_y) > 0:
+        line_y_arr = np.array(line_y); line_x_arr = np.array(line_x)
+        out_line = (line_y_arr > line_lim[1]) | (line_y_arr < line_lim[0])
+        if out_line.any(): ax.plot(line_x_arr[out_line], line_y_arr[out_line], marker="o", color="red", linestyle="None", markersize=10, zorder=5)
+
+    if lab_lim[0] is not None: 
+        ax.axhline(lab_lim[0], color="#7030a0", linestyle="-", linewidth=2, label="LAB LCL")
+        ax.axhline(lab_lim[1], color="#7030a0", linestyle="-", linewidth=2, label="LAB UCL")
+    if line_lim[0] is not None: 
+        ax.axhline(line_lim[0], color="#ff0000", linestyle="--", linewidth=2, label="LINE LCL")
+        ax.axhline(line_lim[1], color="#ff0000", linestyle="--", linewidth=2, label="LINE UCL")
+
+    if local_order:
+        ax.set_xticks(range(len(local_order)))
+        ax.set_xticklabels(local_order, rotation=45)
+
+    ax.set_title(title, fontsize=15, fontweight="bold", pad=25)
+    ax.grid(axis="y", color="#cccccc", linestyle="-", linewidth=1)
+    ax.grid(axis="x", visible=False)
+    ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", frameon=True, edgecolor="black")
+    fig.subplots_adjust(right=0.8, top=0.8) 
+    return fig
+
+def spc_combined_phase2(lab, line, title, lab_lim, line_lim, control_batch_code, ctrl_time, glb_order):
+    if ctrl_time is None: return None
+    lab2 = lab[lab["Time"] >= ctrl_time]; line2 = line[line["Time"] >= ctrl_time]
+    if lab2.empty and line2.empty: return None
+    
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.set_facecolor('#f2f2f2')
+
+    valid_batches = set(lab2["製造批號"]).intersection(set(line2["製造批號"]))
+    local_order = [b for b in glb_order if b in valid_batches]
+
+    lab_dict = dict(zip(lab2["製造批號"], lab2["value"]))
+    line_dict = dict(zip(line2["製造批號"], line2["value"]))
+
+    lab_x, lab_y = [], []
+    line_x, line_y = [], []
+
+    for i, b in enumerate(local_order):
+        if b in lab_dict and b in line_dict:
+            lab_x.append(i)
+            lab_y.append(lab_dict[b])
+            line_x.append(i)
+            line_y.append(line_dict[b])
+
+    if lab_x: ax.plot(lab_x, lab_y, marker="^", color="#548235", linestyle="-", linewidth=1.5, markersize=8, label="LAB Input")
+    if line_x: ax.plot(line_x, line_y, marker="o", color="#ffc000", linestyle="-", linewidth=1.5, markersize=8, markerfacecolor="white", markeredgewidth=2, label="LINE Output")
+
+    import matplotlib.transforms as transforms
+    trans = transforms.blended_transform_factory(ax.transData, ax.transAxes)
+    
+    if control_batch_code is not None and control_batch_code in glb_order:
+        global_ctrl_idx = glb_order.index(control_batch_code)
+        ctrl_x = None
+        for i, b in enumerate(local_order):
+            if glb_order.index(b) >= global_ctrl_idx:
+                ctrl_x = i
+                break
+        if ctrl_x is not None:
+            ax.axvline(x=ctrl_x, color="#000000", linestyle=(0, (3, 3)), linewidth=1.5)
+            ax.text(ctrl_x, 1.02, "  After Control (Phase II)", color="#0070c0", fontsize=14, ha="left", va="bottom", transform=trans)
+
+    if lab_lim[0] is not None and lab_lim[1] is not None and len(lab_y) > 0:
+        lab_y_arr = np.array(lab_y); lab_x_arr = np.array(lab_x)
+        out_lab = (lab_y_arr > lab_lim[1]) | (lab_y_arr < lab_lim[0])
+        if out_lab.any(): ax.plot(lab_x_arr[out_lab], lab_y_arr[out_lab], marker="^", color="red", linestyle="None", markersize=10, zorder=6)
+        
+    if line_lim[0] is not None and line_lim[1] is not None and len(line_y) > 0:
+        line_y_arr = np.array(line_y); line_x_arr = np.array(line_x)
+        out_line = (line_y_arr > line_lim[1]) | (line_y_arr < line_lim[0])
+        if out_line.any(): ax.plot(line_x_arr[out_line], line_y_arr[out_line], marker="o", color="red", linestyle="None", markersize=10, zorder=6)
+
+    if lab_lim[0] is not None: 
+        ax.axhline(lab_lim[0], color="#7030a0", linestyle="-", linewidth=2, label="LAB LCL")
+        ax.axhline(lab_lim[1], color="#7030a0", linestyle="-", linewidth=2, label="LAB UCL")
+    if line_lim[0] is not None: 
+        ax.axhline(line_lim[0], color="#ff0000", linestyle="--", linewidth=2, label="LINE LCL")
+        ax.axhline(line_lim[1], color="#ff0000", linestyle="--", linewidth=2, label="LINE UCL")
+
+    if local_order:
+        ax.set_xticks(range(len(local_order)))
+        ax.set_xticklabels(local_order, rotation=45)
+
+    ax.set_title(title, fontsize=15, fontweight="bold", pad=25)
+    ax.grid(axis="y", color="#cccccc", linestyle="-", linewidth=1)
+    ax.grid(axis="x", visible=False)
+    ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", frameon=True, edgecolor="black")
+    fig.subplots_adjust(right=0.8, top=0.8)
+    return fig
+
+def download(fig, name):
+    buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=200, bbox_inches="tight"); buf.seek(0)
+    st.download_button("📥 Download PNG", buf, name, "image/png", key=f"dl_{name}")
+
+
+# =========================================================
+# VIEW 1: MAIN DASHBOARD
+# =========================================================
+if app_mode == "🚀 Main Dashboard":
+
+    st.sidebar.divider()
+    if control_batch_code is not None:
+        st.sidebar.info(f"🔔 **Control batch**\n\nBatch #{control_batch} → **{control_batch_code}**")
+    elif control_batch is not None:
+        st.sidebar.warning(f"⚠ Control batch #{control_batch} exceeds available batches")
+    st.sidebar.divider()
+
+    def show_limits(factor):
+        c_search = str(color).strip().upper()
+        mask = limit_df["Color_code"].astype(str).str.strip().str.upper() == c_search
+        row = limit_df[mask]
+        if row.empty: return
+        table = row.filter(like=factor).copy()
+        for c in table.columns: table[c] = table[c].map(lambda x: f"{x:.2f}" if pd.notnull(x) else "")
+        st.sidebar.markdown(f"**{factor} Control Limits (Sheet)**")
+        st.sidebar.dataframe(table, use_container_width=True, hide_index=True)
+
+    show_limits("LAB")
+    show_limits("LINE")
+
+    st.title("室內隔間用途－塗料入料管控專案")
+    st.caption("Incoming Paint SPC · LAB / LINE · Phase II Monitoring")
+    st.title(f"📊 SPC Color Dashboard — {color}")
+
+    if not df.empty:
+        t_min = df["Time"].min().strftime("%Y-%m-%d")
+        t_max = df["Time"].max().strftime("%Y-%m-%d")
+        n_batch = df["製造批號"].nunique()
+        display_year = "ALL" if len(selected_years) == 0 else ", ".join(map(str, selected_years))
+        display_month = "ALL" if len(selected_months) == 0 else ", ".join(map(str, selected_months))
+    else:
+        t_min = t_max = "N/A"; n_batch = 0; display_year = "N/A"; display_month = "N/A"
+
+    st.markdown(f"⏱ **{t_min} → {t_max} | n = {n_batch} batches | Year: {display_year} | Month: {display_month}**")
+
+    # =========================================================
+    # EXECUTIVE SUMMARY STATISTICS (OVERALL VS. PHASE II)
+    # =========================================================
+    def build_comparison_table(source_key):
+        rows = []
+        for k in ["ΔL", "Δa", "Δb", "ΔE"]:
+            try:
+                # 1. Fetch Data (Handle normal factors vs ΔE)
+                if k != "ΔE":
+                    df_overall = spc_data[k][source_key].dropna(subset=["value"]).copy()
+                else:
+                    df_L = spc_data["ΔL"][source_key][["製造批號", "Time", "value"]].rename(columns={"value": "L"})
+                    df_a = spc_data["Δa"][source_key][["製造批號", "value"]].rename(columns={"value": "a"})
+                    df_b = spc_data["Δb"][source_key][["製造批號", "value"]].rename(columns={"value": "b"})
+                    df_overall = df_L.merge(df_a, on="製造批號").merge(df_b, on="製造批號")
+                    df_overall["value"] = np.sqrt(df_overall["L"]**2 + df_overall["a"]**2 + df_overall["b"]**2)
+                    df_overall = df_overall.dropna(subset=["value"]).copy()
+                
+                if df_overall.empty: continue
+                
+                # 2. Calculate Overall Stats
+                m_all = df_overall["value"].mean()
+                s_all = df_overall["value"].std()
+                min_all = df_overall["value"].min()
+                max_all = df_overall["value"].max()
+                n_all = len(df_overall)
+                
+                row = {
+                    "Factor": f"**{k}**",
+                    "Overall Mean": f"{m_all:.3f}",
+                    "Phase II Mean": "-",
+                    "Overall Std": f"{s_all:.3f}",
+                    "Phase II Std": "-",
+                    "Overall Min": f"{min_all:.3f}",
+                    "Phase II Min": "-",
+                    "Overall Max": f"{max_all:.3f}",
+                    "Phase II Max": "-",
+                    "Overall (n)": n_all,
+                    "Phase II (n)": "-"
+                }
+                
+                # 3. Calculate Phase II Stats (if available) & Improvement
+                if control_time is not None:
+                    df_p2 = df_overall[df_overall["Time"] >= control_time]
+                    if not df_p2.empty:
+                        m_p2 = df_p2["value"].mean()
+                        s_p2 = df_p2["value"].std()
+                        min_p2 = df_p2["value"].min()
+                        max_p2 = df_p2["value"].max()
+                        n_p2 = len(df_p2)
+                        
+                        # Format Phase II Mean with Delta for ΔE (Lower is better)
+                        mean_str = f"{m_p2:.3f}"
+                        if k == "ΔE" and m_all > 0:
+                            imp_m = ((m_all - m_p2) / m_all) * 100
+                            if imp_m > 0: mean_str += f" (↓ {imp_m:.1f}%)"
+                            elif imp_m < 0: mean_str += f" (↑ {-imp_m:.1f}%)"
+                        row["Phase II Mean"] = mean_str
+                        
+                        # Format Phase II Std with Delta for all factors
+                        std_str = f"{s_p2:.3f}"
+                        if pd.notna(s_all) and pd.notna(s_p2) and s_all > 0:
+                            imp_s = ((s_all - s_p2) / s_all) * 100
+                            if imp_s > 0: std_str += f" (↓ {imp_s:.1f}%)"
+                            elif imp_s < 0: std_str += f" (↑ {-imp_s:.1f}%)"
+                        row["Phase II Std"] = std_str
+                        
+                        row["Phase II Min"] = f"{min_p2:.3f}"
+                        row["Phase II Max"] = f"{max_p2:.3f}"
+                        row["Phase II (n)"] = n_p2
+                        
+                rows.append(row)
+            except Exception:
+                continue
+                
+        df_out = pd.DataFrame(rows)
+        if not df_out.empty:
+            cols_order = ["Factor", "Overall Mean", "Phase II Mean", "Overall Std", "Phase II Std", 
+                          "Overall Min", "Phase II Min", "Overall Max", "Phase II Max", 
+                          "Overall (n)", "Phase II (n)"]
+            df_out = df_out[cols_order]
+            
+        return df_out
+
+    df_summary_line = build_comparison_table("line")
+    df_summary_lab = build_comparison_table("lab")
+
+    st.markdown("### 📋 Executive Performance Summary (Overall vs. Phase II)")
+    st.info("💡 **How to read:** Arrows (↓) in Phase II indicate a percentage reduction in color drift (Mean ΔE) or process variation (Std). **Lower is better.**")
+    
+    col_sum1, col_sum2 = st.columns(2)
+    with col_sum1: 
+        st.markdown("#### 🏭 LINE (Production)")
+        if not df_summary_line.empty:
+            st.dataframe(df_summary_line, use_container_width=True, hide_index=True)
+        else:
+            st.warning("No line data available.")
+            
+    with col_sum2: 
+        st.markdown("#### 🧪 LAB (Input)")
+        if not df_summary_lab.empty:
+            st.dataframe(df_summary_lab, use_container_width=True, hide_index=True)
+        else:
+            st.warning("No lab data available.")
+
+
+    with st.expander("🔎 Batch Summary (Before SPC Aggregation)"):
+        if not df.empty:
+            batch_summary = (
+                df.groupby("製造批號", as_index=False)
+                .agg(
+                    First_Time=("Time", "min"),
+                    LAB_ΔL=("入料檢測 ΔL 正面", "mean"), LAB_Δa=("入料檢測 Δa 正面", "mean"), LAB_Δb=("入料檢測 Δb 正面", "mean"),
+                    LINE_ΔL_N=("正-北 ΔL", "mean"), LINE_ΔL_S=("正-南 ΔL", "mean"),
+                    LINE_Δa_N=("正-北 Δa", "mean"), LINE_Δa_S=("正-南 Δa", "mean"),
+                    LINE_Δb_N=("正-北 Δb", "mean"), LINE_Δb_S=("正-南 Δb", "mean"),
+                    Rows_in_Batch=("製造批號", "count")
+                ).sort_values("First_Time")
+            )
+            batch_summary["LINE_ΔL"] = batch_summary[["LINE_ΔL_N", "LINE_ΔL_S"]].mean(axis=1)
+            batch_summary["LINE_Δa"] = batch_summary[["LINE_Δa_N", "LINE_Δa_S"]].mean(axis=1)
+            batch_summary["LINE_Δb"] = batch_summary[["LINE_Δb_N", "LINE_Δb_S"]].mean(axis=1)
+            display_cols = ["製造批號", "First_Time", "LAB_ΔL", "LAB_Δa", "LAB_Δb", "LINE_ΔL", "LINE_Δa", "LINE_Δb", "Rows_in_Batch"]
+            st.dataframe(batch_summary[display_cols], use_container_width=True, hide_index=True)
+        else:
+            st.warning("No data after filtering.")
+
+    st.markdown("### 📊 CONTROL CHART: LAB-LINE")
+    for k in ["ΔL", "Δa", "Δb"]:
+        lab_lim = safe_get_limit(color, "LAB", k)
+        line_lim = safe_get_limit(color, "LINE", k)
+        fig = spc_combined(spc_data[k]["lab"], spc_data[k]["line"], f"COMBINED {k}", lab_lim, line_lim, control_batch_code, global_batch_order)
+        st.pyplot(fig); download(fig, f"COMBINED_{color}_{k}.png")
+
+    st.markdown("---")
+    st.subheader("📊 SPC Combined Chart (LAB + LINE) – Phase II")
+    for k in ["ΔL", "Δa", "Δb"]:
+        lab_lim = safe_get_limit(color, "LAB", k)
+        line_lim = safe_get_limit(color, "LINE", k)
+        fig = spc_combined_phase2(spc_data[k]["lab"], spc_data[k]["line"], f"{k} – LAB + LINE (Phase II)", lab_lim, line_lim, control_batch_code, control_time, global_batch_order)
+        if fig is not None: st.pyplot(fig); download(fig, f"COMBINED_PHASE2_{color}_{k}.png")
+        else: st.info(f"{k}: Not enough Phase II data")
+
+    st.markdown("---")
+    st.markdown("## 📈 Line Process Distribution Dashboard")
+    def normal_pdf(x, mean, std): return (1 / (std * math.sqrt(2 * math.pi))) * np.exp(-0.5 * ((x - mean) / std) ** 2)
+    cols = st.columns(3)
+    for i, k in enumerate(["ΔL", "Δa", "Δb"]):
+        with cols[i]:
+            values = spc_data[k]["line"]["value"].dropna()
+            if len(values) < 3: st.warning("Not enough data"); continue
+            mean, std = values.mean(), values.std(); lcl, ucl = safe_get_limit(color, "LINE", k)
+            fig, ax = plt.subplots(figsize=(5, 4))
+            bins = np.histogram_bin_edges(values, bins=10)
+            counts, _, patches = ax.hist(values, bins=bins, edgecolor="white", color="#4dabf7", alpha=0.85)
+            for p, l, r in zip(patches, bins[:-1], bins[1:]):
+                center = (l + r) / 2
+                if lcl is not None and ucl is not None and (center < lcl or center > ucl): p.set_facecolor("#ff6b6b")
+            if std > 0:
+                x = np.linspace(mean - 4 * std, mean + 4 * std, 500)
+                ax.plot(x, normal_pdf(x, mean, std) * len(values) * (bins[1] - bins[0]), color="black", linewidth=2)
+            if lcl is not None: ax.axvline(lcl, color="red", linestyle="--", linewidth=1.5, label="LSL")
+            if ucl is not None: ax.axvline(ucl, color="red", linestyle="--", linewidth=1.5, label="USL")
+            ax.text(0.02, 0.95, f"N = {len(values)}\nMean = {mean:.3f}\nStd = {std:.3f}", transform=ax.transAxes, va="top", fontsize=9, bbox=dict(facecolor="white", alpha=0.9))
+            ax.set_title(f"{k} (LINE)"); ax.grid(axis="y", alpha=0.3); ax.legend(fontsize=8); st.pyplot(fig)
+            buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=150, bbox_inches="tight"); buf.seek(0)
+            st.download_button("⬇ Download", data=buf, file_name=f"{k}_line_dist.png", mime="image/png", key=f"dl_line_dist_{k}")
+
+    st.markdown("---")
+    st.markdown("## 🧪 LAB Process Distribution Dashboard")
+    cols = st.columns(3)
+    for i, k in enumerate(["ΔL", "Δa", "Δb"]):
+        with cols[i]:
+            values = spc_data[k]["lab"]["value"].dropna()
+            if len(values) < 3: st.warning("Not enough data"); continue
+            mean, std = values.mean(), values.std(); lcl, ucl = safe_get_limit(color, "LAB", k)
+            fig, ax = plt.subplots(figsize=(5, 4))
+            bins = np.histogram_bin_edges(values, bins=10)
+            counts, _, patches = ax.hist(values, bins=bins, edgecolor="white", color="#1f77b4", alpha=0.85)
+            for p, l, r in zip(patches, bins[:-1], bins[1:]):
+                center = (l + r) / 2
+                if lcl is not None and ucl is not None and (center < lcl or center > ucl): p.set_facecolor("#ff6b6b")
+            if std > 0:
+                x = np.linspace(mean - 4 * std, mean + 4 * std, 500)
+                ax.plot(x, normal_pdf(x, mean, std) * len(values) * (bins[1] - bins[0]), color="black", linewidth=2)
+            if lcl is not None: ax.axvline(lcl, color="red", linestyle="--", linewidth=1.5, label="LSL")
+            if ucl is not None: ax.axvline(ucl, color="red", linestyle="--", linewidth=1.5, label="USL")
+            ax.text(0.02, 0.95, f"N = {len(values)}\nMean = {mean:.3f}\nStd = {std:.3f}", transform=ax.transAxes, va="top", fontsize=9, bbox=dict(facecolor="white", alpha=0.9))
+            ax.set_title(f"{k} (LAB)"); ax.grid(axis="y", alpha=0.3); ax.legend(fontsize=8); st.pyplot(fig)
+            buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=150, bbox_inches="tight"); buf.seek(0)
+            st.download_button("⬇ Download", data=buf, file_name=f"{k}_lab_dist.png", mime="image/png", key=f"dl_lab_dist_{k}")
+
+    # Section: OOC TABLE
+    st.markdown("## 🚨 Out-of-Control Batches")
+    ooc_rows = []
+    
+    for k in ["ΔL", "Δa", "Δb"]:
+        lcl, ucl = safe_get_limit(color, "LINE", k)
+        if control_time is not None:
+            line_phase2 = spc_data[k]["line"][spc_data[k]["line"]["Time"] >= control_time]
+            ooc_line = detect_out_of_control(line_phase2, lcl, ucl)
+            for _, r in ooc_line.iterrows(): 
+                ooc_rows.append({"Factor": k, "Type": "LINE", "Batch No.": r["製造批號"], "Value": round(r["value"], 2), "Rule_CL": r["Rule_CL"], "Rule_3Sigma": r["Rule_3Sigma"]})
+        
+        lcl, ucl = safe_get_limit(color, "LAB", k)
+        if control_time is not None:
+            lab_phase2 = spc_data[k]["lab"][spc_data[k]["lab"]["Time"] >= control_time]
+            ooc_lab = detect_out_of_control(lab_phase2, lcl, ucl)
+            for _, r in ooc_lab.iterrows(): 
+                ooc_rows.append({"Factor": k, "Type": "LAB", "Batch No.": r["製造批號"], "Value": round(r["value"], 2), "Rule_CL": r["Rule_CL"], "Rule_3Sigma": r["Rule_3Sigma"]})
+    
+    if ooc_rows: 
+        ooc_df = pd.DataFrame(ooc_rows)
+        st.dataframe(ooc_df, use_container_width=True)
+    else: 
+        st.success("✅ No out-of-control batches detected")
+
+    # Section: THICKNESS CORRELATION
+    st.markdown("---")
+    st.header("🎨 Thickness – Color Analysis (Per Coil)")
+    
+    coil_col, time_col, thickness_col = "Coil No.", "Time", "Avergage Thickness"
+    dE_col, dL_col, da_col, db_col = "Average value ΔE 正面", "Average value ΔL 正面", "Average value Δa 正面", "Average value Δb 正面"
+    required_cols = [coil_col, time_col, thickness_col, dE_col, dL_col, da_col, db_col]
+    missing = [c for c in required_cols if c not in df.columns]
+
+    if missing:
+        st.error(f"❌ Missing required columns: {missing}")
+    else:
+        df_plot = df.copy()
+        df_plot[time_col] = pd.to_datetime(df_plot[time_col], errors="coerce")
+        df_plot = df_plot.dropna(subset=[time_col])
+        df_plot["Year"] = df_plot[time_col].dt.year
+        df_plot["Month"] = df_plot[time_col].dt.to_period("M").astype(str)
+
+        st.subheader("⏱ Time Filter")
+        col1, col2 = st.columns(2)
+        
+        with col1: 
+            filter_mode_bottom = st.radio("Filter by", ["Month", "Year"], horizontal=True, key="bottom_filter_mode")
+        
+        with col2:
+            if filter_mode_bottom == "Month":
+                all_months = sorted(df_plot["Month"].unique())
+                month_sel = st.multiselect("Select month(s) [Leave empty to show all]", all_months, default=[], key="bottom_month_sel")
+                if month_sel: 
+                    df_plot = df_plot[df_plot["Month"].isin(month_sel)]
+            else:
+                all_years = sorted(df_plot["Year"].unique())
+                year_sel = st.multiselect("Select year(s) [Leave empty to show all]", all_years, default=[], key="bottom_year_sel")
+                if year_sel: 
+                    df_plot = df_plot[df_plot["Year"].isin(year_sel)]
+
+        if df_plot.empty:
+            st.warning("⚠️ No data available for the selected time period.")
+        else:
+            st.subheader("📊 Average Thickness vs ΔE (Each Point = 1 Coil)")
+            fig, ax = plt.subplots(figsize=(10, 6))
+            ax.scatter(df_plot[thickness_col], df_plot[dE_col], alpha=0.75)
+            if len(df_plot) > 0: 
+                ax.axhline(df_plot[dE_col].mean(), linestyle="--", linewidth=2, label=f"Mean ΔE = {df_plot[dE_col].mean():.2f}")
+            ax.set_xlabel("Average Thickness")
+            ax.set_ylabel("ΔE")
+            ax.set_title("Thickness – Color Relationship per Coil")
+            ax.legend()
+            ax.grid(True, linestyle="--", alpha=0.4)
+            st.pyplot(fig)
+
+            st.subheader("📈 ΔE Distribution (Per Coil)")
+            fig2, ax2 = plt.subplots(figsize=(10, 4))
+            data_de = df_plot[dE_col].dropna()
+            if len(data_de) > 0:
+                mean_de, std_de = data_de.mean(), data_de.std()
+                ax2.hist(data_de, bins=20, density=True, alpha=0.7, edgecolor="black", label="ΔE Histogram")
+                if std_de > 0:
+                    x_de = np.linspace(mean_de - 5*std_de, mean_de + 5*std_de, 1000)
+                    ax2.plot(x_de, normal_pdf(x_de, mean_de, std_de), linewidth=3, label="Normal Distribution")
+                ax2.axvline(mean_de, linestyle="--", linewidth=2, label=f"Mean = {mean_de:.2f}")
+                ax2.set_xlabel("ΔE")
+                ax2.set_ylabel("Density")
+                ax2.set_title("ΔE Distribution")
+                ax2.legend()
+                ax2.grid(True, linestyle="--", alpha=0.4)
+                st.pyplot(fig2)
+
+            st.subheader("📊 Average Thickness Distribution")
+            data = df_plot[thickness_col].dropna()
+            if len(data) > 0:
+                mean, std = data.mean(), data.std()
+                col1, col2 = st.columns(2)
+                with col1: LSL = st.number_input("LSL", value=float(mean - 3 * std), key="bottom_lsl")
+                with col2: USL = st.number_input("USL", value=float(mean + 3 * std), key="bottom_usl")
+                
+                if LSL >= USL: 
+                    st.error("❌ LSL must be strictly smaller than USL")
+                else:
+                    fig, ax = plt.subplots(figsize=(10, 4))
+                    ax.hist(data, bins=20, density=True, alpha=0.7, edgecolor="black", label="Thickness Histogram")
+                    x = np.linspace(mean - 5 * std, mean + 5 * std, 1000)
+                    ax.plot(x, normal_pdf(x, mean, std), linewidth=3, label="Normal Distribution")
+                    ax.axvline(mean, linestyle="--", linewidth=2, color="red", label=f"Mean = {mean:.2f}")
+                    ax.axvline(LSL, linestyle="--", linewidth=2, color="green", label=f"LSL = {LSL:.2f}")
+                    ax.axvline(USL, linestyle="--", linewidth=2, color="green", label=f"USL = {USL:.2f}")
+                    ax.axvspan(LSL, USL, alpha=0.15, label="Spec Zone")
+                    ax.set_xlim(mean - 5 * std, mean + 5 * std)
+                    ax.set_xlabel("Average Thickness")
+                    ax.set_ylabel("Density")
+                    ax.grid(True, linestyle="--", alpha=0.4)
+                    ax.legend()
+                    st.pyplot(fig)
+
+            with st.expander("📋 Coil Summary Data"):
+                st.dataframe(df_plot[[coil_col, thickness_col, dE_col, dL_col, da_col, db_col, time_col]].sort_values(by=dE_col, ascending=False), use_container_width=True)
+
+            st.markdown("---")
+            st.header("🔬 PHASE II – THICKNESS CORRELATION")
+            if control_time is None:
+                st.warning("⚠ Control batch not defined. Phase II cannot be determined.")
+            else:
+                df_p2 = df[(df["Time"] >= control_time) & (df["塗料編號"] == color)].copy()
+                if df_p2.empty:
+                    st.warning("⚠ No Phase II data after filtering.")
+                else:
+                    COLOR_FACTORS = {"ΔL": ["入料檢測 ΔL 正面", "Average value ΔL 正面"], "Δa": ["入料檢測 Δa 正面", "Average value Δa 正面"], "Δb": ["入料檢測 Δb 正面", "Average value Δb 正面"], "ΔE": ["Average value ΔE 正面"]}
+                    available_factors = {k: c for k, cols in COLOR_FACTORS.items() for c in cols if c in df_p2.columns}
+                    
+                    if not available_factors:
+                        st.warning("⚠ No color factor columns found in dataset.")
+                    else:
+                        factor_label = st.selectbox("🎯 Select Color Factor", list(available_factors.keys()), index=0, key="bottom_color_factor")
+                        factor_col = available_factors[factor_label]
+                        coil_df = df_p2.groupby("Coil No.", as_index=False).agg({"Avergage Thickness": "mean", factor_col: "mean", "製造批號": "min"}).dropna()
+                        
+                        if coil_df.empty:
+                            st.warning("⚠ No valid coil-level data.")
+                        else:
+                            lcl, ucl = safe_get_limit(color, "LINE", factor_label)
+                            ooc_mask = (coil_df[factor_col] < lcl) | (coil_df[factor_col] > ucl) if lcl is not None and ucl is not None else np.zeros(len(coil_df), dtype=bool)
+                            x, y = coil_df["Avergage Thickness"].values, coil_df[factor_col].values
+                            r2 = None
+                            
+                            if len(x) >= 2:
+                                slope, intercept = np.polyfit(x, y, 1)
+                                r2 = 1 - np.sum((y - (slope * x + intercept)) ** 2) / np.sum((y - np.mean(y)) ** 2) if np.sum((y - np.mean(y)) ** 2) != 0 else 0
+                            
+                            fig, ax = plt.subplots(figsize=(9, 6))
+                            ax.scatter(coil_df[~ooc_mask]["Avergage Thickness"], coil_df[~ooc_mask][factor_col], alpha=0.7, label="Normal Coil")
+                            if ooc_mask.any(): 
+                                ax.scatter(coil_df[ooc_mask]["Avergage Thickness"], coil_df[ooc_mask][factor_col], color="red", s=80, label="OOC Coil")
+                            if r2 is not None: 
+                                ax.plot(np.linspace(x.min(), x.max(), 100), slope * np.linspace(x.min(), x.max(), 100) + intercept, linestyle="--", linewidth=2, label=f"Regression Line (R² = {r2:.3f})")
+                            
+                            ax.set_title(f"Phase II – Per Coil Analysis\nThickness vs {factor_label}" + (f" | r = {coil_df['Avergage Thickness'].corr(coil_df[factor_col]):.3f}, R² = {r2:.3f}" if r2 is not None else ""))
+                            ax.set_xlabel("Average Thickness (per Coil)")
+                            ax.set_ylabel(factor_label)
+                            ax.legend()
+                            ax.grid(True, linestyle="--", alpha=0.4)
+                            st.pyplot(fig)
+
+                            st.markdown("### 🧠 Interpretation")
+                            st.markdown("""
+                            **📊 Correlation Levels Reference:**
+                            
+                            | Level | Correlation Coefficient (\|R\|) | Coefficient of Determination (R²) | Interpretation |
+                            | :--- | :--- | :--- | :--- |
+                            | 🔴 **Strong** | \|R\| ≥ 0.77 | R² ≥ 0.60 | Thickness strongly affects and explains most of the color variation. |
+                            | 🟠 **Moderate**| 0.55 ≤ \|R\| < 0.77 | 0.30 ≤ R² < 0.60 | Thickness partially contributes to color drift. |
+                            | 🟢 **Weak/Low** | \|R\| < 0.55 | R² < 0.30 | Thickness is unlikely the main driver of color variation. |
+                            """)
+
+                            if r2 is not None:
+                                if r2 >= 0.6: 
+                                    st.error("🔴 Thickness strongly explains color variation (High R²)")
+                                elif r2 >= 0.3: 
+                                    st.warning("🟠 Thickness may contribute to color drift (Moderate R²)")
+                                else: 
+                                    st.success("🟢 Thickness unlikely main driver (Low R²)")
+                            else: 
+                                st.info("ℹ Not enough data for regression analysis.")
+
+                            if ooc_mask.any() and (~ooc_mask).any():
+                                thick_col = "Avergage Thickness"
+                                ooc_thick = coil_df[ooc_mask][thick_col]
+                                norm_thick = coil_df[~ooc_mask][thick_col]
+                                
+                                mean_ooc = ooc_thick.mean()
+                                q1_norm = norm_thick.quantile(0.25)
+                                q3_norm = norm_thick.quantile(0.75)
+                                
+                                if mean_ooc > q3_norm:
+                                    st.warning(f"🚨 **Automated Risk Alert:** OOC coils are noticeably clustered in the **HIGH** thickness zone (Mean OOC Thickness: {mean_ooc:.2f} > Normal Q3: {q3_norm:.2f}). Consider tightening the **Upper Specification Limit (USL)** for thickness to mitigate color drift risks.")
+                                elif mean_ooc < q1_norm:
+                                    st.warning(f"🚨 **Automated Risk Alert:** OOC coils are noticeably clustered in the **LOW** thickness zone (Mean OOC Thickness: {mean_ooc:.2f} < Normal Q1: {q1_norm:.2f}). Consider tightening the **Lower Specification Limit (LSL)** for thickness to mitigate color drift risks.")
+                            
+                            with st.expander("📋 Phase II – Coil Level Data"): 
+                                st.dataframe(coil_df.sort_values("製造批號"), use_container_width=True)
+
+# =========================================================
+# VIEW 2: LIMIT STATUS SUMMARY
+# =========================================================
+elif app_mode == "📋 Limit Status Summary":
+    st.title("📋 Limit Status Summary")
+    st.markdown("Global overview of all color codes, identifying stable processes and those requiring control limit recalculation based on SPC rules.")
+
+    st.markdown("### ⚙️ Alert Settings")
+    col_set1, col_set2 = st.columns(2)
+    with col_set1:
+        c_th = st.number_input("Consecutive OOC threshold (Rule 4):", min_value=1, max_value=10, value=2, step=1)
+    with col_set2:
+        t_th = st.number_input("Total (non-consecutive) OOC threshold:", min_value=1, max_value=20, value=5, step=1)
+
+    all_colors = sorted(df_raw["塗料編號"].dropna().unique())
+    summary_data = []
+
+    def max_consecutive_true(s):
+        if s.empty: return 0
+        return (s * (s.groupby((s != s.shift()).cumsum()).cumcount() + 1)).max()
+
+    for c in all_colors:
+        c_clean = str(c).strip()
+        mask = limit_df["Color_code"].astype(str).str.strip() == c_clean
+        row = limit_df[mask]
+        
+        status = "❌ No"
+        if not row.empty:
+            limit_cols = [col for col in row.columns if "LCL" in col or "UCL" in col]
+            if not row[limit_cols].isna().all().all():
+                status = "✅ Yes"
+
+        df_c = df_raw[df_raw["塗料編號"] == c].sort_values("Time")
+        total_batches = df_c["製造批號"].nunique()
+        can_calc_initial = "✅ Yes" if total_batches >= 3 else "❌ No"
+        
+        cb = get_control_batch(c)
+        cb_code = get_control_batch_code(df_c, cb)
+        
+        c_time = df_c[df_c["製造批號"] == cb_code]["Time"].min() if cb_code else None
+        
+        recalc_status = "❌ Not Enough Data"
+        phase2_batches = 0
+        
+        if c_time is not None:
+            df_p2 = df_c[df_c["Time"] >= c_time]
+            phase2_batches = df_p2["製造批號"].nunique()
+            
+            if phase2_batches >= 3:
+                if status == "✅ Yes":
+                    max_consec_any_chart, max_total_any_chart = 0, 0
+                    spc_p2 = calculate_batch_averages(df_p2)
+                    
+                    for f in ["ΔL", "Δa", "Δb"]:
+                        for source in ["line", "lab"]:
+                            lcl, ucl = safe_get_limit(c, source, f)
+                            if lcl is not None and ucl is not None:
+                                vals = spc_p2[f][source]["value"]
+                                mask_val = (vals < lcl) | (vals > ucl)
+                                consec, total_ooc = max_consecutive_true(mask_val), mask_val.sum()
+                                if consec > max_consec_any_chart: max_consec_any_chart = consec
+                                if total_ooc > max_total_any_chart: max_total_any_chart = total_ooc
+                    
+                    if max_consec_any_chart >= c_th: 
+                        recalc_status = f"⚠️ Propose Recalc ({max_consec_any_chart} Consec. OOCs)"
+                    elif max_total_any_chart >= t_th: 
+                        recalc_status = f"⚠️ Propose Recalc ({max_total_any_chart} Total OOCs)"
+                    else: 
+                        recalc_status = f"✅ Stable (Max Consec: {max_consec_any_chart}, Total: {max_total_any_chart})"
+                else: 
+                    recalc_status = "❌ Missing Current Limits"
+            
+        summary_data.append({
+            "Color Code": c, 
+            "Total Batches": total_batches, 
+            "Phase II Batches": phase2_batches,
+            "Current Limits": status, 
+            "Ready for Calc (Total)": can_calc_initial, 
+            "Recommend Recalc (Phase II)": recalc_status
+        })
+
+    summary_df = pd.DataFrame(summary_data)
+    total_c = len(summary_df)
+    has_limit_c = len(summary_df[summary_df["Current Limits"] == "✅ Yes"])
+    ready_initial_c = len(summary_df[summary_df["Ready for Calc (Total)"] == "✅ Yes"])
+    needs_recalc_c = sum(1 for d in summary_data if "⚠️ Propose Recalc" in d["Recommend Recalc (Phase II)"])
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Total Colors", total_c)
+    col2.metric("Colors Configured", has_limit_c)
+    col3.metric("Ready to Calc (Initial)", ready_initial_c)
+    col4.metric("Needs Recalculation", needs_recalc_c, delta="Process Shift Alert", delta_color="inverse")
+
+    st.markdown("---")
+    st.markdown("### 📊 Comprehensive Status Table")
+    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    st.markdown("### 🚨 Action Required: Missing Limits")
+    st.markdown("The following colors do not have configured control limits but have enough data (≥ 3 batches). Please navigate to **🎛️ Control Limit Calculator** to configure them.")
+    
+    pending_colors = summary_df[
+        (summary_df["Current Limits"] == "❌ No") & 
+        (summary_df["Ready for Calc (Total)"] == "✅ Yes")
+    ]
+    
+    if not pending_colors.empty:
+        st.warning(f"Found **{len(pending_colors)}** color(s) waiting for limit calculation:")
+        col_table, col_empty = st.columns([1, 2])
+        with col_table:
+            st.dataframe(
+                pending_colors[["Color Code", "Total Batches"]], 
+                hide_index=True,
+                use_container_width=True
+            )
+    else:
+        st.success("🎉 All colors with sufficient data already have their control limits configured!")
+
+# =========================================================
+# VIEW 3: CONTROL LIMIT CALCULATOR
+# =========================================================
+elif app_mode == "🎛️ Control Limit Calculator":
+    
+    st.title("🎛️ Control Limits Analysis & Derived ΔE")
+    
+    with st.expander("⚙️ Data Source Settings", expanded=True):
+        st.markdown("**Select Data Source:**")
+        calc_source = st.radio("Data Source", ["LINE", "LAB"], horizontal=True)
+
+    # =========================================================
+    # VIEW 3 - LOADED DATA TABLE (BATCH-LEVEL DATA USED IN CALC)
+    # =========================================================
+    st.markdown("### 📋 Loaded Data Used for Control Limit Calculation")
+
+    source_key = calc_source.lower()
+    calc_data_table = None
+    time_cols = []
+
+    for _f in ["ΔL", "Δa", "Δb"]:
+        _tmp = spc_data[_f][source_key][["製造批號", "Time", "value"]].copy()
+        _time_col = f"Time_{_f}"
+        time_cols.append(_time_col)
+        _tmp = _tmp.rename(columns={"Time": _time_col, "value": _f})
+
+        if calc_data_table is None:
+            calc_data_table = _tmp
+        else:
+            calc_data_table = calc_data_table.merge(_tmp, on="製造批號", how="outer")
+
+    if calc_data_table is not None and not calc_data_table.empty:
+        for _tc in time_cols:
+            calc_data_table[_tc] = pd.to_datetime(calc_data_table[_tc], errors="coerce")
+
+        # All three factors are calculated at batch level. Use the earliest valid
+        # timestamp only for display/sorting; the values themselves are untouched.
+        calc_data_table["Time"] = calc_data_table[time_cols].min(axis=1)
+        calc_data_table = calc_data_table.drop(columns=time_cols)
+        calc_data_table = calc_data_table[["製造批號", "Time", "ΔL", "Δa", "Δb"]]
+        calc_data_table = calc_data_table.sort_values(["Time", "製造批號"]).reset_index(drop=True)
+        calc_data_table = calc_data_table.rename(columns={"製造批號": "Batch No."})
+
+        st.caption(
+            f"Color Code: {color} | Source: {calc_source} | "
+            f"Batches shown: {len(calc_data_table)} | Data level: Batch average"
+        )
+        st.dataframe(
+            calc_data_table.style.format({"ΔL": "{:.3f}", "Δa": "{:.3f}", "Δb": "{:.3f}"}, na_rep=""),
+            hide_index=True,
+            use_container_width=True
+        )
+        st.caption(
+            "This is the batch-level dataset used by View 3 after the current Color / Year / Month filters. "
+            "Missing component values are left blank and are not included in that factor's control-limit calculation."
+        )
+    else:
+        st.warning("No loaded batch-level data available for the current filters and selected source.")
+        
+    st.markdown("---")
+
+    factors = ["ΔL", "Δa", "Δb"]
+    calc_res = {}
+    dE_std_sq, dE_iqr_sq = 0, 0
+
+    for f in factors:
+        st.markdown(f"### 📊 Analysis: **{f}** ({calc_source})")
+        
+        col_sig, col_iqr = st.columns(2)
+        with col_sig:
+            sig = st.number_input(f"🔸 Sigma (K) for {f}", value=3.0, step=0.1, key=f"sig_{f}")
+        with col_iqr:
+            iqr_k = st.number_input(f"🔸 IQR Sens. for {f}", value=1.5, step=0.1, key=f"iqr_{f}")
+        
+        d = spc_data[f][calc_source.lower()]["value"]
+        
+        if len(d) >= 3:
+            m, s = d.mean(), d.std()
+            q1, q3 = d.quantile(0.25), d.quantile(0.75)
+            olcl, oucl = safe_get_limit(color, calc_source, f)
+            
+            std_lcl, std_ucl = m - sig*s, m + sig*s
+            iqr_lcl, iqr_ucl = q1 - iqr_k*(q3-q1), q3 + iqr_k*(q3-q1)
+            
+            calc_res[f] = {
+                "data": d, "batch": spc_data[f][calc_source.lower()]["製造批號"], "m": m, "s": s, "median": d.median(),
+                "sig": sig, "iqr_k": iqr_k, "olcl": olcl, "oucl": oucl, "std_lcl": std_lcl, "std_ucl": std_ucl, "iqr_lcl": iqr_lcl, "iqr_ucl": iqr_ucl
+            }
+            
+            dE_std_sq += max(abs(std_lcl), abs(std_ucl))**2
+            dE_iqr_sq += max(abs(iqr_lcl), abs(iqr_ucl))**2
+
+            col_chart, col_table = st.columns([2.2, 1])
+            res = calc_res[f]
+            
+            with col_table:
+                olcl_str = f"{res['olcl']:.3f}" if pd.notnull(res['olcl']) else "None"
+                oucl_str = f"{res['oucl']:.3f}" if pd.notnull(res['oucl']) else "None"
+                
+                df_table = pd.DataFrame([
+                    {"Method": "0. Spec (Sheet)", "Min": olcl_str, "Max": oucl_str, "Center": "-", "Note": "Current Target"},
+                    {"Method": f"1. Standard ({res['sig']}σ)", "Min": f"{res['std_lcl']:.3f}", "Max": f"{res['std_ucl']:.3f}", "Center": f"{res['m']:.3f}", "Note": "Basic Stats"},
+                    {"Method": f"2. IQR (k={res['iqr_k']})", "Min": f"{res['iqr_lcl']:.3f}", "Max": f"{res['iqr_ucl']:.3f}", "Center": f"{res['median']:.3f}", "Note": "Robust Fence"}
+                ])
+                st.dataframe(df_table, hide_index=True, use_container_width=True)
+                st.info(f"**Stats:** μ={res['m']:.3f} | σ={res['s']:.3f} | n={len(res['data'])}")
+
+            with col_chart:
+                fig, ax = plt.subplots(figsize=(10, 4.5))
+                ax.set_facecolor('#f2f2f2')
+
+                x_vals = [global_batch_order.index(b) for b in res["batch"] if b in global_batch_order]
+                y_vals = res["data"][res["batch"].isin(global_batch_order)].values
+                if x_vals: x_vals, y_vals = zip(*sorted(zip(x_vals, y_vals)))
+
+                ax.plot(x_vals, y_vals, marker="o", color="#808080", linestyle="-", linewidth=1.5, markersize=7, alpha=0.5, label="Process Data")
+                
+                if pd.notnull(res["olcl"]):
+                    ax.axhline(res["olcl"], color="black", linestyle="-", linewidth=1.5, label="0. Spec")
+                    ax.axhline(res["oucl"], color="black", linestyle="-", linewidth=1.5)
+                ax.axhline(res["std_lcl"], color="#d62728", linestyle="--", linewidth=1.5, label=f"1. Std (±{res['sig']}σ)")
+                ax.axhline(res["std_ucl"], color="#d62728", linestyle="--", linewidth=1.5)
+                ax.axhline(res["iqr_lcl"], color="#1f77b4", linestyle=":", linewidth=2, label=f"2. IQR (k={res['iqr_k']})")
+                ax.axhline(res["iqr_ucl"], color="#1f77b4", linestyle=":", linewidth=2)
+                ax.axhline(res["m"], color="#2ca02c", linestyle="-.", alpha=0.5, label="Mean")
+                
+                if x_vals:
+                    ax.set_xticks(x_vals)
+                    ax.set_xticklabels([global_batch_order[i] for i in x_vals], rotation=45)
+
+                ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=9, frameon=True, edgecolor="black")
+                ax.grid(axis="y", color="#cccccc", linestyle="-", linewidth=1)
+                ax.grid(axis="x", visible=False)
+                fig.subplots_adjust(right=0.75, bottom=0.2)
+                st.pyplot(fig)
+                plt.close(fig)
+            st.markdown("---")
+        else:
+            st.warning(f"Not enough data for {f} (min 3 batches).")
+
+    if len(calc_res) == 3:
+        # =====================================================
+        # TASK 3 SUMMARY: ΔL / Δa / Δb — BOTH CALCULATION METHODS
+        # Recommendation = conservative intersection of Method 1 and Method 2
+        # =====================================================
+        st.markdown("### 📋 Control Limit Summary — ΔL / Δa / Δb")
+
+        summary_rows = []
+        recommendation_valid = True
+        dE_rec_sq = 0.0
+
+        for f in factors:
+            res = calc_res[f]
+
+            # Conservative recommendation: keep only the range supported by BOTH methods.
+            rec_lcl = max(res["std_lcl"], res["iqr_lcl"])
+            rec_ucl = min(res["std_ucl"], res["iqr_ucl"])
+            has_overlap = rec_lcl <= rec_ucl
+
+            if has_overlap:
+                res["rec_lcl"] = rec_lcl
+                res["rec_ucl"] = rec_ucl
+                res["rec_status"] = "✅ Overlap"
+                dE_rec_sq += max(abs(rec_lcl), abs(rec_ucl)) ** 2
+            else:
+                # Do not fabricate a control limit when the two statistical methods disagree.
+                res["rec_lcl"] = None
+                res["rec_ucl"] = None
+                res["rec_status"] = "⚠ No overlap"
+                recommendation_valid = False
+
+            summary_rows.append({
+                "Factor": f,
+                "n": len(res["data"]),
+                "Mean": round(res["m"], 3),
+                "標準差 (σ)": round(res["s"], 3),
+                "Method 1 Kσ": f"{res['sig']:.1f}σ",
+                "Standard LCL": round(res["std_lcl"], 3),
+                "Standard UCL": round(res["std_ucl"], 3),
+                "Method 2 IQR k": f"{res['iqr_k']:.1f}",
+                "IQR LCL": round(res["iqr_lcl"], 3),
+                "IQR UCL": round(res["iqr_ucl"], 3),
+                "Recommended LCL": round(rec_lcl, 3) if has_overlap else None,
+                "Recommended UCL": round(rec_ucl, 3) if has_overlap else None,
+                "Current Sheet LCL": round(res["olcl"], 3) if pd.notnull(res["olcl"]) else None,
+                "Current Sheet UCL": round(res["oucl"], 3) if pd.notnull(res["oucl"]) else None,
+                "Recommendation Status": res["rec_status"],
+            })
+
+        control_limit_summary = pd.DataFrame(summary_rows)
+        st.dataframe(control_limit_summary, hide_index=True, use_container_width=True)
+        st.caption(
+            "Method 1 = Mean ± Kσ. Method 2 = Q1 − k×IQR to Q3 + k×IQR. "
+            "Recommended limits = intersection of Method 1 and Method 2: "
+            "LCL = max(Standard LCL, IQR LCL), UCL = min(Standard UCL, IQR UCL)."
+        )
+        st.markdown("---")
+
+        dE_std = math.sqrt(dE_std_sq)
+        dE_iqr = math.sqrt(dE_iqr_sq)
+        dE_rec = math.sqrt(dE_rec_sq) if recommendation_valid else None
+        limit_threshold = 1.0 if calc_source.upper() == "LINE" else 0.5
+
+        st.markdown("### 🎯 Derived ΔE UCL Comparison")
+        col_res1, col_res2, col_res3 = st.columns(3)
+
+        with col_res1:
+            if dE_std <= limit_threshold:
+                st.success(f"**Method 1 (Standard)** ΔE UCL: **{dE_std:.3f}** (✅ ≤ {limit_threshold})")
+            else:
+                st.error(f"**Method 1 (Standard)** ΔE UCL: **{dE_std:.3f}** (⚠️ > {limit_threshold})")
+
+        with col_res2:
+            if dE_iqr <= limit_threshold:
+                st.success(f"**Method 2 (IQR)** ΔE UCL: **{dE_iqr:.3f}** (✅ ≤ {limit_threshold})")
+            else:
+                st.error(f"**Method 2 (IQR)** ΔE UCL: **{dE_iqr:.3f}** (⚠️ > {limit_threshold})")
+
+        with col_res3:
+            if dE_rec is None:
+                st.warning("**Recommended** ΔE UCL: **N/A**\n\n⚠ One or more factors have no overlap")
+            elif dE_rec <= limit_threshold:
+                st.success(f"**Recommended** ΔE UCL: **{dE_rec:.3f}** (✅ ≤ {limit_threshold})")
+            else:
+                st.error(f"**Recommended** ΔE UCL: **{dE_rec:.3f}** (⚠️ > {limit_threshold})")
+
+        st.markdown("---")
+        st.markdown("### 💡 AI Control Limit Recommendation")
+        st.info(
+            "Recommendation is based directly on the overlap of **Method 1 (Standard)** and "
+            "**Method 2 (IQR)**. The system does **not** expand ΔL / Δa / Δb limits to consume the available ΔE tolerance."
+        )
+
+        col_rl, col_ra, col_rb = st.columns(3)
+        rec_cols = {"ΔL": col_rl, "Δa": col_ra, "Δb": col_rb}
+
+        for f in factors:
+            res = calc_res[f]
+            col = rec_cols[f]
+
+            if res["rec_lcl"] is not None and res["rec_ucl"] is not None:
+                rec_center = (res["rec_lcl"] + res["rec_ucl"]) / 2
+                rec_width = res["rec_ucl"] - res["rec_lcl"]
+                col.success(
+                    f"**{f} Recommended Control Limit**\n\n"
+                    f"### {res['rec_lcl']:.3f} ~ {res['rec_ucl']:.3f}\n\n"
+                    f"Mean: **{res['m']:.3f}**  |  σ: **{res['s']:.3f}**  |  Center: **{rec_center:.3f}**  |  Width: **{rec_width:.3f}**"
+                )
+            else:
+                col.warning(
+                    f"**{f} Recommended Control Limit**\n\n"
+                    "### Manual Review Required\n\n"
+                    "Standard and IQR ranges do not overlap."
+                )
+
+        if recommendation_valid:
+            if dE_rec <= limit_threshold:
+                st.success(
+                    f"✅ **Recommendation validated:** Using the recommended ΔL / Δa / Δb boundaries, "
+                    f"the derived worst-case ΔE UCL is **{dE_rec:.3f}**, within the {calc_source} threshold **≤ {limit_threshold}**."
+                )
+            else:
+                st.warning(
+                    f"⚠️ **Recommendation requires further tightening:** The overlap-based limits yield "
+                    f"a derived worst-case ΔE UCL of **{dE_rec:.3f}**, above the {calc_source} threshold **{limit_threshold}**. "
+                    "The system will not widen the component limits; review process variation or tighten the limits manually."
+                )
+        else:
+            st.warning(
+                "⚠️ A final three-factor recommendation cannot be issued because at least one factor has no common range "
+                "between Standard and IQR. Review that factor before setting a new control limit."
+            )
+
+    st.markdown("---")
+    st.subheader("🧮 Manual ΔE Calculator")
+    col_ml, col_ma, col_mb = st.columns(3)
+    with col_ml: man_L = st.number_input("Input ΔL value:", value=0.000, step=0.100, format="%.3f")
+    with col_ma: man_a = st.number_input("Input Δa value:", value=0.000, step=0.100, format="%.3f")
+    with col_mb: man_b = st.number_input("Input Δb value:", value=0.000, step=0.100, format="%.3f")
+        
+    manual_dE = math.sqrt(man_L**2 + man_a**2 + man_b**2)
+    limit_threshold = 1.0 if calc_source.upper() == "LINE" else 0.5
+    
+    st.markdown("#### **Calculation Result**")
+    if manual_dE <= limit_threshold:
+        st.success(f"### 🎯 Calculated ΔE: **{manual_dE:.3f}** (✅ Meets **{calc_source}** standard ≤ {limit_threshold})")
+    else:
+        st.error(f"### 🎯 Calculated ΔE: **{manual_dE:.3f}** (⚠️ Exceeds **{calc_source}** limit > {limit_threshold})")
+
+# =========================================================
+# VIEW 4: LAB VS LINE SCALE-UP ANALYSIS
+# =========================================================
+elif app_mode == "🔬 Lab vs Line Scale-up":
+    st.title("🔬 Lab to Line Scale-up Analysis")
+    st.markdown("""
+    Analyze the historical deviation between **Laboratory (LAB)** inputs and **Production (LINE)** outcomes. 
+    Use this tool to determine the necessary **Offset Compensation** for color formulation.
+    """)
+
+    if df.empty:
+        st.warning("⚠️ No data available for analysis.")
+    else:
+        batch_compare = df.groupby("製造批號", as_index=False).agg({
+            "入料檢測 ΔL 正面": "mean", "入料檢測 Δa 正面": "mean", "入料檢測 Δb 正面": "mean",
+            "正-北 ΔL": "mean", "正-南 ΔL": "mean",
+            "正-北 Δa": "mean", "正-南 Δa": "mean",
+            "正-北 Δb": "mean", "正-南 Δb": "mean"
+        }).dropna()
+
+        batch_compare["LINE_ΔL"] = batch_compare[["正-北 ΔL", "正-南 ΔL"]].mean(axis=1)
+        batch_compare["LINE_Δa"] = batch_compare[["正-北 Δa", "正-南 Δa"]].mean(axis=1)
+        batch_compare["LINE_Δb"] = batch_compare[["正-北 Δb", "正-南 Δb"]].mean(axis=1)
+
+        batch_compare = batch_compare.rename(columns={
+            "入料檢測 ΔL 正面": "LAB_ΔL",
+            "入料檢測 Δa 正面": "LAB_Δa",
+            "入料檢測 Δb 正面": "LAB_Δb"
+        })
+
+        factors = ["ΔL", "Δa", "Δb"]
+        tabs = st.tabs([f"Factor {f}" for f in factors])
+        
+        for i, f in enumerate(factors):
+            with tabs[i]:
+                lab_col, line_col = f"LAB_{f}", f"LINE_{f}"
+                x, y = batch_compare[lab_col].values, batch_compare[line_col].values
+                
+                if len(x) < 3:
+                    st.info(f"Insufficient paired data for {f}.")
+                    continue
+                    
+                diff = y - x
+                mean_bias = np.mean(diff)
+                std_dev = np.std(diff)
+                slope, intercept = np.polyfit(x, y, 1)
+                r2_score = (np.corrcoef(x, y)[0, 1])**2
+                
+                st.markdown(f"### 📊 Process Metrics: **{f}**")
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Systematic Bias (Avg)", f"{mean_bias:+.3f}", help="Average deviation between Line and Lab")
+                m2.metric("Fluctuation (1σ)", f"±{std_dev:.3f}", help="Standard deviation of the shift")
+                m3.metric("Predictability (R²)", f"{r2_score:.3f}", help="Model reliability (closer to 1.0 is better)")
+
+                if f == "ΔL":
+                    direction = "LIGHTER" if mean_bias > 0.05 else "DARKER" if mean_bias < -0.05 else "STABLE"
+                elif f == "Δa":
+                    direction = "REDDER" if mean_bias > 0.05 else "GREENER" if mean_bias < -0.05 else "STABLE"
+                else: 
+                    direction = "YELLOWER" if mean_bias > 0.05 else "BLUER" if mean_bias < -0.05 else "STABLE"
+
+                if direction != "STABLE":
+                    st.warning(f"💡 **Insight:** Production tends to be **{direction}** than Lab samples (Offset: {mean_bias:+.3f}).")
+                else:
+                    st.success(f"✅ **Insight:** Production results are highly consistent with Lab inputs.")
+
+                col_chart, col_pred = st.columns([2.2, 1])
+                
+                with col_pred:
+                    st.subheader("🔮 Outcome Predictor")
+                    user_lab = st.number_input(f"Current LAB {f}:", value=float(x[-1]), step=0.01, format="%.3f", key=f"f5_en_{f}")
+                    
+                    pred_line = slope * user_lab + intercept
+                    ci_95 = 2 * std_dev
+                    
+                    st.info(f"**Predicted LINE {f}:**\n## {pred_line:.3f}")
+                    st.caption(f"Confidence Range (95%):\n**[{pred_line-ci_95:.3f} to {pred_line+ci_95:.3f}]**")
+                    st.success(f"🛠 **Lab Suggestion:**\nTo reach 0.000 on LINE, formulate LAB at: **{-mean_bias:+.3f}**")
+
+                with col_chart:
+                    fig, ax = plt.subplots(figsize=(8, 6))
+                    ax.grid(True, linestyle="--", alpha=0.3, zorder=0)
+                    
+                    ax.scatter(x, y, alpha=0.6, color="#3498db", edgecolors="white", s=80, label="Historical Data", zorder=3)
+                    ax.scatter(user_lab, pred_line, color="#f1c40f", edgecolors="black", s=300, marker="*", label="Prediction ⭐", zorder=5)
+                    
+                    mn, mx = min(x.min(), y.min(), user_lab, pred_line) - 0.1, max(x.max(), y.max(), user_lab, pred_line) + 0.1
+                    ax.plot([mn, mx], [mn, mx], color="#7f8c8d", linestyle="--", alpha=0.6, label="Ideal (LINE = LAB)", zorder=1)
+                    ax.plot(np.linspace(mn, mx, 100), slope * np.linspace(mn, mx, 100) + intercept, color="#e74c3c", linewidth=2.5, label="Actual Trend", zorder=2)
+                    
+                    bbox_style = dict(boxstyle="round,pad=0.3", alpha=0.1, lw=1)
+                    if f == "ΔL":
+                        ax.annotate("☀️ Lighter", xy=(0.95, 0.95), xycoords='axes fraction', ha='right', bbox=dict(facecolor='yellow', **bbox_style))
+                        ax.annotate("🌑 Darker", xy=(0.05, 0.05), xycoords='axes fraction', ha='left', bbox=dict(facecolor='gray', **bbox_style))
+                    elif f == "Δa":
+                        ax.annotate("🔴 Redder", xy=(0.95, 0.95), xycoords='axes fraction', ha='right', bbox=dict(facecolor='red', **bbox_style))
+                        ax.annotate("🟢 Greener", xy=(0.05, 0.05), xycoords='axes fraction', ha='left', bbox=dict(facecolor='green', **bbox_style))
+                    elif f == "Δb":
+                        ax.annotate("🟡 Yellower", xy=(0.95, 0.95), xycoords='axes fraction', ha='right', bbox=dict(facecolor='orange', **bbox_style))
+                        ax.annotate("🔵 Bluer", xy=(0.05, 0.05), xycoords='axes fraction', ha='left', bbox=dict(facecolor='blue', **bbox_style))
+
+                    ax.set_title(f"Lab-to-Line Scale-up: {f}", fontweight='bold')
+                    ax.set_xlabel(f"LAB Input ({f})")
+                    ax.set_ylabel(f"LINE Actual ({f})")
+                    ax.legend(loc='lower right')
+                    ax.set_xlim(mn, mx); ax.set_ylim(mn, mx)
+                    
+                    st.pyplot(fig)
+                    plt.close(fig)
+
+# =========================================================
+# VIEW 5: AI OOC WORD REPORT GENERATOR
+# =========================================================
+elif app_mode == "📄 AI OOC Word Report":
+    st.title("📄 AI Automated OOC Report Generator")
+    st.markdown("The system will scan **ALL** color codes with active control limits (Phase II) to find Out-Of-Control batches. The AI will then automatically package the data, current limits, charts, and corrective recommendations into a comprehensive Word report.")
+
+    if st.button("🚀 Run System Scan & Generate Word Report", type="primary"):
+        with st.spinner("🔍 Scanning the entire system and generating analytical insights... This may take 10-30 seconds."):
+            all_colors = sorted(df_raw["塗料編號"].dropna().unique())
+            master_ooc_rows = []
+            report_data_dict = {} 
+
+            for c in all_colors:
+                c_clean = str(c).strip()
+                mask = limit_df["Color_code"].astype(str).str.strip() == c_clean
+                row = limit_df[mask]
+                
+                if row.empty: continue
+                limit_cols = [col for col in row.columns if "LCL" in col or "UCL" in col]
+                if row[limit_cols].isna().all().all(): continue
+
+                df_c = df_raw[df_raw["塗料編號"] == c].copy()
+                cb = get_control_batch(c)
+                cb_code = get_control_batch_code(df_c, cb)
+                
+                c_time = df_c[df_c["製造批號"] == cb_code]["Time"].min() if cb_code else None
+
+                if c_time is None: continue
+
+                global_batch_order_c = df_c.sort_values("Time")["製造批號"].drop_duplicates().tolist()
+                spc_c = calculate_batch_averages(df_c)
+                color_has_ooc = False
+
+                for k in ["ΔL", "Δa", "Δb"]:
+                    lcl_line, ucl_line = safe_get_limit(c, "LINE", k)
+                    if lcl_line is not None and ucl_line is not None:
+                        line_phase2 = spc_c[k]["line"][spc_c[k]["line"]["Time"] >= c_time]
+                        ooc_line = detect_out_of_control(line_phase2, lcl_line, ucl_line)
+                        for _, r in ooc_line.iterrows():
+                            master_ooc_rows.append({"Color": c, "Factor": k, "Type": "LINE", "Batch": r["製造批號"], "Value": round(r["value"], 2), "Rule_CL": r["Rule_CL"], "Rule_3Sigma": r["Rule_3Sigma"]})
+                            color_has_ooc = True
+
+                    lcl_lab, ucl_lab = safe_get_limit(c, "LAB", k)
+                    if lcl_lab is not None and ucl_lab is not None:
+                        lab_phase2 = spc_c[k]["lab"][spc_c[k]["lab"]["Time"] >= c_time]
+                        ooc_lab = detect_out_of_control(lab_phase2, lcl_lab, ucl_lab)
+                        for _, r in ooc_lab.iterrows():
+                            master_ooc_rows.append({"Color": c, "Factor": k, "Type": "LAB", "Batch": r["製造批號"], "Value": round(r["value"], 2), "Rule_CL": r["Rule_CL"], "Rule_3Sigma": r["Rule_3Sigma"]})
+                            color_has_ooc = True
+
+                if color_has_ooc:
+                    report_data_dict[c] = {"spc": spc_c, "cb_code": cb_code, "global_order": global_batch_order_c}
+
+            if not master_ooc_rows:
+                st.success("✅ Excellent! The system did not detect any out-of-control batches.")
+            else:
+                df_master_ooc = pd.DataFrame(master_ooc_rows)
+                st.warning(f"⚠️ Detected **{len(df_master_ooc)}** OOC alerts across **{len(report_data_dict)}** different color codes.")
+                st.dataframe(df_master_ooc, use_container_width=True)
+
+                def generate_ai_insights(factor, factor_ooc, line_lim):
+                    avg_val = factor_ooc["Value"].astype(float).mean()
+                    
+                    color_shift = "Unknown"
+                    if factor == "ΔL": color_shift = "Lighter (White)" if avg_val > 0 else "Darker (Black)"
+                    elif factor == "Δa": color_shift = "Redder" if avg_val > 0 else "Greener"
+                    elif factor == "Δb": color_shift = "Yellower" if avg_val > 0 else "Bluer"
+                    
+                    direction = "upper"
+                    if line_lim[1] is not None and avg_val > line_lim[1]: direction = "upper"
+                    elif line_lim[0] is not None and avg_val < line_lim[0]: direction = "lower"
+                    
+                    analysis = f"Statistical analysis indicates that the '{factor}' factor exhibits a significant deviation towards the {direction} control limit, resulting in a '{color_shift}' visual shift on the production line. A total of {len(factor_ooc)} recent batches violated stability rules. "
+                    
+                    has_3sigma = any(factor_ooc["Rule_3Sigma"] == True)
+                    if has_3sigma:
+                        analysis += "The presence of 3-Sigma (fluctuation) violations indicates an unstable process variation, likely caused by inconsistent machine parameters or uneven film thickness."
+                    else:
+                        analysis += "The violations are strictly Control Limit breaches, suggesting a systematic mean shift in the baseline formulation."
+                        
+                    actions = (
+                        f"1. Formulation Adjustment: Request the Lab to apply a counter-offset to the baseline formula to mitigate the '{color_shift}' drift.\n"
+                        f"2. Process Audit: Verify film thickness consistency on the production line, as thickness variations strongly correlate with {factor} drifts.\n"
+                        f"3. Material Traceability: Isolate and inspect the raw material lots used in the highlighted OOC batches for potential contamination."
+                    )
+                    return analysis, actions
+
+                doc = docx.Document()
+                doc.add_heading('System-Wide Out-of-Control (OOC) Report', 0)
+                doc.add_paragraph(f'Report generated on: {datetime.now().strftime("%Y-%m-%d %H:%M")}')
+                doc.add_paragraph(f'Total OOC Instances: {len(df_master_ooc)}')
+                doc.add_page_break()
+
+                for color_name, data in report_data_dict.items():
+                    doc.add_heading(f'Color Code: {color_name}', level=1)
+                    color_ooc = df_master_ooc[df_master_ooc["Color"] == color_name]
+
+                    def spc_combined_word(lab, line, title, lab_lim, line_lim, control_batch_code, glb_order):
+                        fig, ax = plt.subplots(figsize=(10, 4.5))
+                        ax.set_facecolor('#f2f2f2')
+
+                        valid_batches = set(lab["製造批號"]).intersection(set(line["製造批號"]))
+                        local_order = [b for b in glb_order if b in valid_batches]
+
+                        lab_dict = dict(zip(lab["製造批號"], lab["value"]))
+                        line_dict = dict(zip(line["製造批號"], line["value"]))
+
+                        lab_x, lab_y = [], []
+                        line_x, line_y = [], []
+
+                        for i, b in enumerate(local_order):
+                            if b in lab_dict and b in line_dict:
+                                lab_x.append(i)
+                                lab_y.append(lab_dict[b])
+                                line_x.append(i)
+                                line_y.append(line_dict[b])
+
+                        if lab_x: ax.plot(lab_x, lab_y, marker="^", color="#548235", linestyle="-", linewidth=1.5, markersize=7, label="LAB Input")
+                        if line_x: ax.plot(line_x, line_y, marker="o", color="#ffc000", linestyle="-", linewidth=1.5, markersize=7, markerfacecolor="white", markeredgewidth=1.5, label="LINE Output")
+
+                        import matplotlib.transforms as transforms
+                        trans = transforms.blended_transform_factory(ax.transData, ax.transAxes)
+
+                        if control_batch_code is not None and control_batch_code in glb_order:
+                            global_ctrl_idx = glb_order.index(control_batch_code)
+                            ctrl_x = None
+                            for i, b in enumerate(local_order):
+                                if glb_order.index(b) >= global_ctrl_idx:
+                                    ctrl_x = i
+                                    break
+                            if ctrl_x is not None:
+                                ax.axvline(x=ctrl_x, color="#000000", linestyle=(0, (3, 3)), linewidth=1.5)
+                                ax.text(ctrl_x, 1.02, "  After Control", color="#0070c0", fontsize=12, ha="left", va="bottom", transform=trans)
+                                ax.text(ctrl_x, 1.02, "Before Control  ", color="#0070c0", fontsize=12, ha="right", va="bottom", transform=trans)
+
+                        if lab_lim[0] is not None and lab_lim[1] is not None and len(lab_y) > 0:
+                            lab_y_arr = np.array(lab_y); lab_x_arr = np.array(lab_x)
+                            out_lab = (lab_y_arr > lab_lim[1]) | (lab_y_arr < lab_lim[0])
+                            if out_lab.any(): ax.plot(lab_x_arr[out_lab], lab_y_arr[out_lab], marker="^", color="red", linestyle="None", markersize=9, zorder=5)
+                        
+                        if line_lim[0] is not None and line_lim[1] is not None and len(line_y) > 0:
+                            line_y_arr = np.array(line_y); line_x_arr = np.array(line_x)
+                            out_line = (line_y_arr > line_lim[1]) | (line_y_arr < line_lim[0])
+                            if out_line.any(): ax.plot(line_x_arr[out_line], line_y_arr[out_line], marker="o", color="red", linestyle="None", markersize=9, zorder=5)
+
+                        if lab_lim[0] is not None: 
+                            ax.axhline(lab_lim[0], color="#7030a0", linestyle="-", linewidth=2, label="LAB LCL")
+                            ax.axhline(lab_lim[1], color="#7030a0", linestyle="-", linewidth=2, label="LAB UCL")
+                        if line_lim[0] is not None: 
+                            ax.axhline(line_lim[0], color="#ff0000", linestyle="--", linewidth=2, label="LINE LCL")
+                            ax.axhline(line_lim[1], color="#ff0000", linestyle="--", linewidth=2, label="LINE UCL")
+
+                        if local_order:
+                            ax.set_xticks(range(len(local_order)))
+                            ax.set_xticklabels(local_order, rotation=45)
+
+                        ax.set_title(title, fontsize=13, fontweight="bold", pad=20)
+                        ax.grid(axis="y", color="#cccccc", linestyle="-", linewidth=1)
+                        ax.grid(axis="x", visible=False)
+                        ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", frameon=True, edgecolor="black")
+                        fig.subplots_adjust(right=0.75, top=0.8)
+                        return fig
+
+                    for factor in ["ΔL", "Δa", "Δb"]:
+                        factor_ooc = color_ooc[color_ooc["Factor"] == factor]
+                        if not factor_ooc.empty:
+                            doc.add_heading(f'Factor: {factor}', level=2)
+
+                            lab_lim = safe_get_limit(color_name, "LAB", factor)
+                            line_lim = safe_get_limit(color_name, "LINE", factor)
+
+                            lab_str = f"[{lab_lim[0]:.2f} ~ {lab_lim[1]:.2f}]" if lab_lim[0] is not None else "Not Configured"
+                            line_str = f"[{line_lim[0]:.2f} ~ {line_lim[1]:.2f}]" if line_lim[0] is not None else "Not Configured"
+                            
+                            limit_p = doc.add_paragraph()
+                            limit_p.add_run("📌 Current Control Limits (Spec):\n").bold = True
+                            limit_p.add_run(f"   • LAB Target: {lab_str}\n   • LINE Target: {line_str}")
+
+                            table = doc.add_table(rows=1, cols=4)
+                            table.style = 'Table Grid'
+                            hdr = table.rows[0].cells
+                            hdr[0].text, hdr[1].text, hdr[2].text, hdr[3].text = 'Type', 'Batch No.', 'Value', 'Violated Rule'
+
+                            for _, r in factor_ooc.iterrows():
+                                row_cells = table.add_row().cells
+                                row_cells[0].text = str(r["Type"])
+                                row_cells[1].text = str(r["Batch"])
+                                val = float(r["Value"])
+                                row_cells[2].text = str(int(val)) if val.is_integer() else str(val)
+                                
+                                rules = []
+                                if r["Rule_CL"]: rules.append("Control Limit")
+                                if r["Rule_3Sigma"]: rules.append("3-Sigma")
+                                row_cells[3].text = " + ".join(rules)
+
+                            doc.add_paragraph("\n📈 Control Chart Reference:")
+
+                            cb_code = data["cb_code"]
+                            spc_c = data["spc"]
+                            glb_order_c = data["global_order"]
+
+                            fig = spc_combined_word(spc_c[factor]["lab"], spc_c[factor]["line"], f"{color_name} - COMBINED {factor}", lab_lim, line_lim, cb_code, glb_order_c)
+                            img_buf = io.BytesIO()
+                            fig.savefig(img_buf, format='png', dpi=150, bbox_inches='tight')
+                            img_buf.seek(0)
+                            doc.add_picture(img_buf, width=Inches(6.0))
+                            plt.close(fig)
+
+                            analysis_text, action_text = generate_ai_insights(factor, factor_ooc, line_lim)
+                            
+                            doc.add_heading('🤖 AI Process Analysis', level=3)
+                            doc.add_paragraph(analysis_text)
+                            
+                            doc.add_heading('🛠️ Recommended Corrective Actions', level=3)
+                            doc.add_paragraph(action_text)
+
+                    doc.add_page_break()
+
+                report_buf = io.BytesIO()
+                doc.save(report_buf)
+                report_buf.seek(0)
+
+                st.success("✅ Word file successfully compiled with AI Insights!")
+                st.download_button(
+                    label="📥 Download System-Wide Word Report",
+                    data=report_buf,
+                    file_name=f"System_OOC_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                )
+# =========================================================
+# VIEW 6: I-MR CHART (COIL-LEVEL)
+# =========================================================
+elif app_mode == "📈 I-MR Chart (Coil-Level)":
+    st.title("📈 Individual - Moving Range (I-MR) Chart")
+    st.markdown("Coil-level statistical process control analysis without batch aggregation.")
+
+    st.subheader("⚙️ Configuration")
+    col_cfg1, col_cfg2 = st.columns(2)
+    with col_cfg1:
+        source_opt = st.radio("Select Data Source:", ["LINE", "LAB"], horizontal=True, key="imr_source")
+    with col_cfg2:
+        factor_opt = st.selectbox("Select Color Factor:", ["ΔL", "Δa", "Δb", "ΔE"], key="imr_factor")
+
+    # Map the correct column based on user selection
+    target_col = None
+    df_imr_base = df.copy()
+
+    if source_opt == "LINE":
+        if factor_opt == "ΔE":
+            st.warning("⚠️ ΔE is not directly pre-calculated for LINE in raw data. Please select ΔL, Δa, or Δb.")
+        else:
+            col_n, col_s = f"正-北 {factor_opt}", f"正-南 {factor_opt}"
+            if col_n in df_imr_base.columns and col_s in df_imr_base.columns:
+                df_imr_base["Coil_Value"] = df_imr_base[[col_n, col_s]].mean(axis=1)
+                target_col = "Coil_Value"
+            else:
+                st.error(f"❌ Missing LINE columns for {factor_opt}")
+    else: # LAB
+        if factor_opt == "ΔE":
+            target_col = "Average value ΔE 正面"
+        else:
+            target_col = f"入料檢測 {factor_opt} 正面"
+            if target_col not in df_imr_base.columns:
+                target_col = f"Average value {factor_opt} 正面"
+
+    if target_col and target_col in df_imr_base.columns:
+        # Strict Coil-Level Filtering: Drop missing values, sort chronologically by time
+        df_imr = df_imr_base.dropna(subset=["Coil No.", "Time", target_col]).sort_values("Time").copy()
+        
+        # Ensure 1 row = 1 unique coil (take the first chronological record per coil)
+        df_imr = df_imr.drop_duplicates(subset=["Coil No."], keep="first").reset_index(drop=True)
+
+        if len(df_imr) < 2:
+            st.warning("⚠️ Not enough coil data to generate an I-MR chart (minimum 2 coils required).")
+        else:
+            # ---------------------------------------------------------
+            # STATISTICAL CALCULATIONS (I-MR for n=2)
+            # ---------------------------------------------------------
+            df_imr["MR"] = df_imr[target_col].diff().abs()
+            
+            mean_x = df_imr[target_col].mean()
+            mean_mr = df_imr["MR"].mean()
+
+            # SPC Constants for Moving Range of size n=2
+            E2 = 2.66
+            D4 = 3.267
+
+            ucl_i = mean_x + E2 * mean_mr
+            lcl_i = mean_x - E2 * mean_mr
+            ucl_mr = D4 * mean_mr
+
+            # ---------------------------------------------------------
+            # ---------------------------------------------------------
+            # INDIVIDUAL (I) CHART PLOTTING
+            # ---------------------------------------------------------
+            # Get date range for the title
+            t_min = df_imr["Time"].min().strftime("%Y-%m-%d")
+            t_max = df_imr["Time"].max().strftime("%Y-%m-%d")
+            date_str = f"{t_min} to {t_max}"
+
+            # Fetch Spec Limits from Google Sheet
+            spec_lcl, spec_ucl = safe_get_limit(color, source_opt, factor_opt)
+
+            st.markdown("---")
+            st.markdown(f"### 📊 Individual (I) Chart - {factor_opt} ({source_opt})")
+            
+            # Kích thước rộng hơn để dàn trải data đều và chuyên nghiệp
+            fig_i, ax_i = plt.subplots(figsize=(14, 6))
+            ax_i.set_facecolor('#f2f2f2')
+            
+            # 1. Plot actual data points (Base line) - Sử dụng màu Xanh dương đậm (#003366)
+            ax_i.plot(df_imr["Coil No."], df_imr[target_col], marker='o', color='#003366', linestyle='-', linewidth=1.5, markersize=6, label="Individual Value")
+            
+            # 2. Highlight Out-of-Control (3-Sigma) points in RED
+            ooc_i_mask = (df_imr[target_col] > ucl_i) | (df_imr[target_col] < lcl_i)
+            if ooc_i_mask.any():
+                ax_i.scatter(df_imr[ooc_i_mask]["Coil No."], df_imr[ooc_i_mask][target_col], color="red", s=80, zorder=5, label="🚨 Out of Control (3σ)")
+
+            # 3. Plot Statistical Limits (Calculated from Data)
+            ax_i.axhline(mean_x, color="DeepSkyBlue", linestyle="-", linewidth=2.5, label=f"Mean (X) = {mean_x:.3f}")
+            ax_i.axhline(ucl_i, color="#d62728", linestyle="--", linewidth=1.5, label=f"Stat UCL (3σ) = {ucl_i:.3f}")
+            ax_i.axhline(lcl_i, color="#d62728", linestyle="--", linewidth=1.5, label=f"Stat LCL (3σ) = {lcl_i:.3f}")
+            
+            # 4. Plot Specification Limits (From Google Sheet)
+            if spec_lcl is not None:
+                ax_i.axhline(spec_lcl, color="#7030a0", linestyle="-", linewidth=2, label=f"Spec LCL = {spec_lcl}")
+            if spec_ucl is not None:
+                ax_i.axhline(spec_ucl, color="#7030a0", linestyle="-", linewidth=2, label=f"Spec UCL = {spec_ucl}")
+
+            # Smart X-Axis Ticks
+            if len(df_imr) > 40:
+                ax_i.set_xticks(ax_i.get_xticks()[::len(df_imr)//30])
+            ax_i.set_xticklabels(ax_i.get_xticklabels(), rotation=45, ha='right', fontsize=9)
+
+            # Title and Labels
+            ax_i.set_title(f"I-Chart: {color} | {factor_opt} ({source_opt})\nTimeframe: {date_str}", fontsize=15, fontweight="bold", pad=15)
+            ax_i.set_ylabel("Measured Value", fontsize=11)
+            ax_i.grid(axis="y", color="#cccccc", linestyle="-", linewidth=1)
+            
+            # Legend Configuration
+            ax_i.legend(bbox_to_anchor=(1.02, 1), loc="upper left", frameon=True, edgecolor="black")
+            fig_i.subplots_adjust(right=0.8, bottom=0.2)
+            
+            st.pyplot(fig_i)
+            plt.close(fig_i)
+
+            # ---------------------------------------------------------
+            # MOVING RANGE (MR) CHART PLOTTING
+            # ---------------------------------------------------------
+            st.markdown(f"### 📉 Moving Range (MR) Chart - {factor_opt} ({source_opt})")
+            
+            # Kích thước đồng bộ với I-Chart
+            fig_mr, ax_mr = plt.subplots(figsize=(14, 5))
+            ax_mr.set_facecolor('#f2f2f2')
+            
+            # 1. Plot actual data points (Base line) - Sử dụng màu Xanh dương đậm (#003366)
+            ax_mr.plot(df_imr["Coil No."], df_imr["MR"], marker='s', color='#003366', linestyle='-', linewidth=1.5, markersize=6, label="Moving Range")
+            
+            # 2. Highlight Out-of-Control points in RED
+            ooc_mr_mask = (df_imr["MR"] > ucl_mr)
+            if ooc_mr_mask.any():
+                ax_mr.scatter(df_imr[ooc_mr_mask]["Coil No."], df_imr[ooc_mr_mask]["MR"], color="red", marker='s', s=80, zorder=5, label="🚨 Out of Control (3σ)")
+
+            # 3. Plot Limits
+            ax_mr.axhline(mean_mr, color="DeepSkyBlue", linestyle="-", linewidth=2, label=f"Mean (MR) = {mean_mr:.3f}")
+            ax_mr.axhline(ucl_mr, color="#d62728", linestyle="--", linewidth=1.5, label=f"UCL = {ucl_mr:.3f}")
+            ax_mr.axhline(0, color="#d62728", linestyle="--", linewidth=1.5, label="LCL = 0.000")
+
+            if len(df_imr) > 40:
+                ax_mr.set_xticks(ax_mr.get_xticks()[::len(df_imr)//30])
+            ax_mr.set_xticklabels(ax_mr.get_xticklabels(), rotation=45, ha='right', fontsize=9)
+
+            ax_mr.legend(bbox_to_anchor=(1.02, 1), loc="upper left", frameon=True, edgecolor="black")
+            ax_mr.grid(axis="y", color="#cccccc", linestyle="-", linewidth=1)
+            ax_mr.set_ylabel("Range |X(i) - X(i-1)|", fontsize=11)
+            fig_mr.subplots_adjust(right=0.8, bottom=0.2)
+            
+            st.pyplot(fig_mr)
+            plt.close(fig_mr)
+
+            # ---------------------------------------------------------
+            # COIL LEVEL DATA TABLE
+            # ---------------------------------------------------------
+
+            # ---------------------------------------------------------
+            # COIL LEVEL DATA TABLE
+            # ---------------------------------------------------------
+            with st.expander("📋 Coil-Level Statistical Data"):
+                display_cols = ["Time", "製造批號", "Coil No.", target_col, "MR"]
+                st.dataframe(
+                    df_imr[display_cols].rename(columns={
+                        "Time": "Timestamp",
+                        "製造批號": "Batch No.",
+                        target_col: f"{factor_opt} Value"
+                    }).style.format({f"{factor_opt} Value": "{:.3f}", "MR": "{:.3f}"}, na_rep="-"),
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+# =========================================================
+# NEW VIEW: KPI ACHIEVEMENT REPORT – CONTROLLED COLORS
+# OOC KPI ONLY (NO Cpk – no true LSL/USL specification limits available)
+# =========================================================
+elif app_mode == "🎯 KPI Achievement Report":
+    st.title("🎯 SPC OOC KPI Report – Controlled Colors")
+    st.markdown(
+        "Evaluate controlled colors using the management target: "
+        "**Post-control OOC Rate ≤ target**."
+    )
+
+    st.info(
+        "**KPI logic:** The **Control Start Batch itself is excluded**; KPI evaluation starts from the "
+        "**next batch onward**. A post-control batch is counted as OOC only once even if multiple factors "
+        "(ΔL / Δa / Δb) exceed the configured control limits. **Value = LCL or Value = UCL remains IN CONTROL**; "
+        "OOC is counted only when **Value < LCL** or **Value > UCL**. The original tasks and their 3-Sigma logic "
+        "remain unchanged. This KPI report uses only configured LCL/UCL breaches."
+    )
+
+    col_cfg1, col_cfg2 = st.columns(2)
+    with col_cfg1:
+        report_source = st.radio(
+            "Data Source",
+            ["LINE", "LAB"],
+            horizontal=True,
+            index=0,
+            key="kpi_report_source"
+        )
+    with col_cfg2:
+        ooc_target = st.number_input(
+            "OOC Rate Target (%)",
+            min_value=0.0,
+            max_value=100.0,
+            value=5.0,
+            step=0.5,
+            key="kpi_ooc_target"
+        )
+
+    source_key = report_source.lower()
+    factors = ["ΔL", "Δa", "Δb"]
+
+    report_rows = []
+    detail_store = {}
+    all_colors_report = sorted(df_raw["塗料編號"].dropna().unique())
+
+    for c in all_colors_report:
+        df_c = df_raw[df_raw["塗料編號"] == c].sort_values("Time").copy()
+        if df_c.empty:
+            continue
+
+        cb = get_control_batch(c)
+        cb_code = get_control_batch_code(df_c, cb)
+        c_time = df_c[df_c["製造批號"] == cb_code]["Time"].min() if cb_code else None
+
+        # Only colors with an actual control start point are treated as controlled colors.
+        if cb is None or cb_code is None or c_time is None:
+            continue
+
+        # IMPORTANT: the control start batch is only the boundary.
+        # KPI counting starts from the NEXT batch.
+        batch_order_c = df_c.sort_values("Time")["製造批號"].drop_duplicates().tolist()
+        try:
+            control_idx = batch_order_c.index(cb_code)
+            post_control_batches = batch_order_c[control_idx + 1:]
+        except ValueError:
+            post_control_batches = []
+
+        df_p2 = df_c[df_c["製造批號"].isin(post_control_batches)].copy()
+        if df_p2.empty:
+            continue
+
+        spc_p2 = calculate_batch_averages(df_p2)
+
+        # Use only batches with valid values for all 3 color factors so the
+        # denominator is consistent across ΔL / Δa / Δb.
+        factor_batch_sets = []
+        factor_frames = {}
+        for f in factors:
+            fdf = spc_p2[f][source_key][["製造批號", "Time", "value"]].dropna(subset=["value"]).copy()
+            factor_frames[f] = fdf
+            factor_batch_sets.append(set(fdf["製造批號"].tolist()))
+
+        valid_batches = set.intersection(*factor_batch_sets) if factor_batch_sets and all(factor_batch_sets) else set()
+        n_valid = len(valid_batches)
+        post_control_raw_batches = df_p2["製造批號"].nunique()
+
+        unique_ooc_batches = set()
+        cl_complete = True
+        factor_ooc_counts = {}
+        ooc_trigger_rows = []
+        control_limit_columns = {}
+
+        for f in factors:
+            lcl, ucl, lcl_col_used, ucl_col_used = get_kpi_control_limit_exact(c, report_source, f)
+            control_limit_columns[f] = {
+                "LCL column": lcl_col_used,
+                "UCL column": ucl_col_used,
+                "LCL": lcl,
+                "UCL": ucl,
+            }
+
+            if lcl is None or ucl is None:
+                cl_complete = False
+
+            fdf = factor_frames[f]
+            if valid_batches:
+                fdf = fdf[fdf["製造批號"].isin(valid_batches)].copy()
+            else:
+                fdf = fdf.iloc[0:0].copy()
+
+            if not fdf.empty and lcl is not None and ucl is not None:
+                vals = pd.to_numeric(fdf["value"], errors="coerce")
+
+                # Boundary rule: equal to LCL/UCL is IN CONTROL.
+                # Tiny tolerance only avoids floating-point artifacts.
+                tol = 1e-9
+                below_lcl = vals < (float(lcl) - tol)
+                above_ucl = vals > (float(ucl) + tol)
+                ooc_mask_kpi = below_lcl | above_ucl
+
+                ooc_f = fdf[ooc_mask_kpi].copy()
+                factor_ooc_counts[f] = ooc_f["製造批號"].nunique()
+                unique_ooc_batches.update(ooc_f["製造批號"].astype(str).tolist())
+
+                for _, rr in ooc_f.iterrows():
+                    vv = float(rr["value"])
+                    side = "Below LCL" if vv < (float(lcl) - tol) else "Above UCL"
+                    distance = (float(lcl) - vv) if side == "Below LCL" else (vv - float(ucl))
+                    ooc_trigger_rows.append({
+                        "Factor": f,
+                        "Batch No.": str(rr["製造批號"]),
+                        "Time": rr.get("Time", pd.NaT),
+                        "Batch Average": vv,
+                        "LCL": float(lcl),
+                        "UCL": float(ucl),
+                        "Trigger": side,
+                        "Outside by": distance,
+                    })
+            else:
+                factor_ooc_counts[f] = 0
+
+        n_ooc = len(unique_ooc_batches)
+        ooc_rate = (n_ooc / n_valid * 100) if n_valid > 0 else np.nan
+
+        if not cl_complete:
+            ooc_status = "⚪ CL Missing"
+        elif pd.isna(ooc_rate):
+            ooc_status = "⚪ No Data"
+        elif ooc_rate <= ooc_target:
+            ooc_status = "✅ Achieved"
+        else:
+            ooc_status = "❌ Not Achieved"
+
+        report_rows.append({
+            "Color Code": c,
+            "Control Batch #": cb,
+            "Control Start Batch": cb_code,
+            "Post-Control Raw Batches": post_control_raw_batches,
+            "SPC Valid Batches": n_valid,
+            "OOC Batches": n_ooc,
+            "OOC Rate (%)": round(ooc_rate, 2) if pd.notna(ooc_rate) else np.nan,
+            "OOC KPI": ooc_status,
+        })
+
+        detail_store[c] = {
+            "control_batch": cb,
+            "control_batch_code": cb_code,
+            "control_time": c_time,
+            "raw_post_control_batches": post_control_raw_batches,
+            "valid_batches": valid_batches,
+            "ooc_batches": unique_ooc_batches,
+            "ooc_rate": ooc_rate,
+            "ooc_status": ooc_status,
+            "factor_ooc_counts": factor_ooc_counts,
+            "ooc_trigger_rows": ooc_trigger_rows,
+            "control_limit_columns": control_limit_columns,
+        }
+
+    report_df = pd.DataFrame(report_rows)
+
+    if report_df.empty:
+        st.warning("No controlled colors with post-control data were found.")
+    else:
+        n_controlled = len(report_df)
+        n_ooc_ok = int((report_df["OOC KPI"] == "✅ Achieved").sum())
+        n_action = int((report_df["OOC KPI"] == "❌ Not Achieved").sum())
+        n_incomplete = n_controlled - n_ooc_ok - n_action
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Controlled Colors", n_controlled)
+        m2.metric(f"OOC ≤ {ooc_target:.1f}%", f"{n_ooc_ok}/{n_controlled}")
+        m3.metric("Action Required", n_action)
+        m4.metric("Incomplete / Missing CL", n_incomplete)
+
+        st.markdown("---")
+        st.markdown("### 📋 Controlled Color OOC KPI Summary")
+
+        def _kpi_row_style(row):
+            if row.get("OOC KPI") == "✅ Achieved":
+                return ["background-color: #e8f5e9"] * len(row)
+            if row.get("OOC KPI") == "❌ Not Achieved":
+                return ["background-color: #ffebee"] * len(row)
+            return ["background-color: #fff8e1"] * len(row)
+
+        display_report_df = report_df.sort_values(
+            by=["OOC Rate (%)", "Color Code"],
+            ascending=[False, True],
+            na_position="last"
+        ).reset_index(drop=True)
+
+        st.dataframe(
+            display_report_df.style
+                .apply(_kpi_row_style, axis=1)
+                .format({"OOC Rate (%)": "{:.2f}"}, na_rep="-"),
+            use_container_width=True,
+            hide_index=True
+        )
+
+        csv_buf = display_report_df.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            "📥 Download OOC KPI Summary CSV",
+            data=csv_buf,
+            file_name=f"SPC_OOC_KPI_{report_source}_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+            key="download_kpi_report_csv"
+        )
+
+        # ---------------------------------------------------------
+        # SHORT WORD REPORT FOR MANAGEMENT
+        # Only added to this KPI task; existing tasks/charts unchanged.
+        # ---------------------------------------------------------
+        def build_ooc_kpi_word_report(summary_df, source_name, target_pct,
+                                      controlled_count, achieved_count,
+                                      action_count, incomplete_count):
+            doc = docx.Document()
+
+            # Compact page layout
+            section = doc.sections[0]
+            section.top_margin = Inches(0.55)
+            section.bottom_margin = Inches(0.55)
+            section.left_margin = Inches(0.55)
+            section.right_margin = Inches(0.55)
+
+            # Font setup for Traditional Chinese / English
+            styles = doc.styles
+            styles["Normal"].font.name = "Microsoft JhengHei"
+            styles["Normal"].font.size = docx.shared.Pt(10)
+            for style_name in ["Title", "Heading 1", "Heading 2"]:
+                if style_name in styles:
+                    styles[style_name].font.name = "Microsoft JhengHei"
+
+            title = doc.add_heading("SPC 管制成效 KPI 摘要報告", level=0)
+            title.alignment = 1
+
+            p = doc.add_paragraph()
+            p.add_run("資料來源：").bold = True
+            p.add_run(str(source_name))
+            p.add_run("    報告日期：").bold = True
+            p.add_run(datetime.now().strftime("%Y-%m-%d"))
+
+            # 1. Objective / rule
+            doc.add_heading("一、評估目標", level=1)
+            p = doc.add_paragraph()
+            p.add_run(f"管理目標：管制後 OOC Rate ≤ {target_pct:.1f}% 。").bold = True
+            doc.add_paragraph(
+                "Control Start Batch 僅作為管制起始點，不納入 KPI 計算；"
+                "僅計算其後批次。數值等於 LCL 或 UCL 視為管制內，"
+                "僅當數值 < LCL 或 > UCL 時判定為 OOC。"
+            )
+
+            # 2. Overall summary
+            doc.add_heading("二、整體結果", level=1)
+            summary_table = doc.add_table(rows=2, cols=4)
+            summary_table.style = "Table Grid"
+            headers = ["已管制色號", f"OOC ≤ {target_pct:.1f}%", "需改善", "資料/界限不完整"]
+            values = [str(controlled_count), str(achieved_count), str(action_count), str(incomplete_count)]
+            for j, h in enumerate(headers):
+                summary_table.rows[0].cells[j].text = h
+                summary_table.rows[1].cells[j].text = values[j]
+
+            # 3. Color summary table
+            doc.add_heading("三、色號 KPI 結果", level=1)
+            word_cols = [
+                "Color Code", "Control Start Batch", "SPC Valid Batches",
+                "OOC Batches", "OOC Rate (%)", "OOC KPI"
+            ]
+            word_df = summary_df[word_cols].copy()
+            word_df = word_df.sort_values(
+                by=["OOC Rate (%)", "Color Code"],
+                ascending=[False, True],
+                na_position="last"
+            )
+
+            table = doc.add_table(rows=1, cols=len(word_cols))
+            table.style = "Table Grid"
+            zh_headers = ["色號", "管制起始批號", "有效批數", "OOC批數", "OOC率(%)", "判定"]
+            for j, h in enumerate(zh_headers):
+                table.rows[0].cells[j].text = h
+
+            for _, rr in word_df.iterrows():
+                cells = table.add_row().cells
+                cells[0].text = str(rr["Color Code"])
+                cells[1].text = str(rr["Control Start Batch"])
+                cells[2].text = str(int(rr["SPC Valid Batches"]))
+                cells[3].text = str(int(rr["OOC Batches"]))
+                cells[4].text = "-" if pd.isna(rr["OOC Rate (%)"]) else f"{float(rr['OOC Rate (%)']):.2f}"
+                status = str(rr["OOC KPI"])
+                if "Achieved" in status and "Not" not in status:
+                    cells[5].text = "達成"
+                elif "Not Achieved" in status:
+                    cells[5].text = "未達成"
+                elif "CL Missing" in status:
+                    cells[5].text = "界限缺失"
+                else:
+                    cells[5].text = "資料不足"
+
+            # 4. Short management conclusion
+            doc.add_heading("四、結論", level=1)
+            if action_count == 0 and incomplete_count == 0:
+                conclusion = (
+                    f"本次共評估 {controlled_count} 個已管制色號，全部符合 "
+                    f"OOC Rate ≤ {target_pct:.1f}% 之管理目標，整體管制成效符合預期。"
+                )
+            else:
+                parts = [
+                    f"本次共評估 {controlled_count} 個已管制色號，"
+                    f"其中 {achieved_count} 個達成 OOC Rate ≤ {target_pct:.1f}% 目標。"
+                ]
+                if action_count > 0:
+                    not_ok = word_df[word_df["OOC KPI"] == "❌ Not Achieved"]
+                    action_text = ", ".join(
+                        f"{r['Color Code']} ({float(r['OOC Rate (%)']):.2f}%)"
+                        for _, r in not_ok.iterrows() if pd.notna(r["OOC Rate (%)"])
+                    )
+                    if action_text:
+                        parts.append(f"未達目標色號：{action_text}，建議列為後續優先追蹤對象。")
+                if incomplete_count > 0:
+                    parts.append(f"另有 {incomplete_count} 個色號因資料或管制界限不完整，暫無法完成 KPI 判定。")
+                conclusion = "".join(parts)
+
+            doc.add_paragraph(conclusion)
+
+            buf = io.BytesIO()
+            doc.save(buf)
+            buf.seek(0)
+            return buf
+
+        word_report_buf = build_ooc_kpi_word_report(
+            display_report_df,
+            report_source,
+            ooc_target,
+            n_controlled,
+            n_ooc_ok,
+            n_action,
+            n_incomplete
+        )
+
+        st.download_button(
+            "📄 Download Short Word Report for Management",
+            data=word_report_buf,
+            file_name=f"SPC_OOC_KPI_Management_Report_{report_source}_{datetime.now().strftime('%Y%m%d')}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            key="download_kpi_management_word"
+        )
+
+        st.markdown("---")
+        st.markdown("### 🔎 Color Detail")
+        selected_kpi_color = st.selectbox(
+            "Select controlled color",
+            display_report_df["Color Code"].tolist(),
+            key="kpi_detail_color"
+        )
+
+        d = detail_store[selected_kpi_color]
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Control Start Batch", str(d["control_batch_code"]))
+        c2.metric("Post-Control Valid Batches", len(d["valid_batches"]))
+        c3.metric("OOC Batches", len(d["ooc_batches"]))
+        c4.metric(
+            "OOC Rate",
+            f"{d['ooc_rate']:.2f}%" if pd.notna(d["ooc_rate"]) else "N/A",
+            delta=d["ooc_status"]
+        )
+
+        factor_detail_rows = []
+        for f in factors:
+            lcl, ucl, lcl_col_used, ucl_col_used = get_kpi_control_limit_exact(
+                selected_kpi_color, report_source, f
+            )
+            factor_detail_rows.append({
+                "Factor": f,
+                "SPC LCL": lcl,
+                "SPC UCL": ucl,
+                "LCL Source Column": lcl_col_used,
+                "UCL Source Column": ucl_col_used,
+                "Factor OOC Batches": d["factor_ooc_counts"].get(f, 0),
+            })
+
+        factor_detail_df = pd.DataFrame(factor_detail_rows)
+        st.dataframe(
+            factor_detail_df.style.format({
+                "SPC LCL": "{:.3f}",
+                "SPC UCL": "{:.3f}",
+            }, na_rep="-"),
+            use_container_width=True,
+            hide_index=True
+        )
+
+        st.markdown("#### 🚨 OOC Trigger Audit (KPI Only)")
+        if d.get("ooc_trigger_rows"):
+            audit_df = pd.DataFrame(d["ooc_trigger_rows"]).sort_values(["Time", "Factor", "Batch No."])
+            st.dataframe(
+                audit_df.style.format({
+                    "Batch Average": "{:.10f}",
+                    "LCL": "{:.10f}",
+                    "UCL": "{:.10f}",
+                    "Outside by": "{:.10f}",
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.warning(
+                "Only batches AFTER the Control Start Batch listed above are counted in the KPI OOC numerator. "
+                "If this table is empty, OOC Batches = 0."
+            )
+        else:
+            st.success("✅ No post-control batch is strictly outside the configured LCL/UCL for this source.")
+
+        st.caption(
+            "**Interpretation:** OOC Rate = unique post-control OOC batches ÷ valid post-control batches × 100%. "
+            "The Control Start Batch itself is excluded. Values exactly equal to LCL or UCL are treated as in control."
+        )
+
