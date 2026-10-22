@@ -1209,13 +1209,13 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 x, pair_f["LINE"].values,
                 marker="D", linestyle="-", linewidth=1.6, markersize=5.5,
                 color="#5b9bd5", markerfacecolor="#5b9bd5", markeredgewidth=0,
-                label=f"{f}*LINE"
+                label="LINE Output"
             )
             ax.plot(
                 x, pair_f["LAB"].values,
                 marker="s", linestyle="-", linewidth=1.6, markersize=5.5,
                 color="#ed7d31", markerfacecolor="#ed7d31", markeredgewidth=0,
-                label=f"{f}*LAB"
+                label="LAB Input"
             )
 
             # Current LINE limits show whether the output remains controlled.
@@ -1233,7 +1233,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
 
             # Candidate incoming LAB range is the main output of this task.
             if has_overlap:
-                ax.axhspan(rec_lcl, rec_ucl, color="#dbeafe", alpha=0.35, label="Recommended LAB Zone")
+                ax.axhspan(rec_lcl, rec_ucl, color="#dbeafe", alpha=0.35, label="Recommended LAB")
                 ax.axhline(rec_lcl, color="#2563eb", linestyle=":", linewidth=1.4)
                 ax.axhline(rec_ucl, color="#2563eb", linestyle=":", linewidth=1.4)
 
@@ -1242,9 +1242,9 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 ax.axhline(lab_ucl_sheet, color="#7f7f7f", linestyle="-.", linewidth=1.0)
 
             ax.set_xticks(x)
-            ax.set_xticklabels(ordered_batches, rotation=45, ha="right", fontsize=9)
+            ax.set_xticklabels(ordered_batches, rotation=35, ha="right", fontsize=9)
             ax.set_ylabel(f)
-            ax.set_xlabel("Batch No.", fontsize=10)
+            ax.set_xlabel("Batch No.", fontsize=10, labelpad=10)
             ax.set_title(f"Analysis: {f} (LAB vs LINE)", fontsize=14, fontweight="bold", pad=12)
             ax.grid(axis="y", color="#bfbfbf", linestyle="-", linewidth=0.8)
             ax.grid(axis="x", visible=False)
@@ -1264,14 +1264,18 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 if lab not in uniq_labels:
                     uniq_handles.append(h)
                     uniq_labels.append(lab)
-            ax.legend(
+            # Put legend on its own row at the very bottom of the figure.
+            # This prevents overlap with rotated Batch No. tick labels and X-axis title.
+            fig.legend(
                 uniq_handles, uniq_labels,
-                loc="upper center", bbox_to_anchor=(0.5, -0.06),
+                loc="lower center", bbox_to_anchor=(0.5, 0.015),
                 ncol=min(3, len(uniq_labels)), frameon=False, fontsize=9,
-                handlelength=2.0, columnspacing=1.2, handletextpad=0.5
+                handlelength=2.0, columnspacing=1.6, handletextpad=0.5
             )
 
-            fig.subplots_adjust(bottom=0.30, right=0.96)
+            # Reserve three clearly separated vertical zones:
+            # plot -> Batch No. labels/X title -> legend
+            fig.subplots_adjust(bottom=0.36, right=0.96)
             st.pyplot(fig)
             plt.close(fig)
 
