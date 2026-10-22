@@ -1242,9 +1242,9 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 ax.axhline(lab_ucl_sheet, color="#7f7f7f", linestyle="-.", linewidth=1.0)
 
             ax.set_xticks(x)
-            ax.set_xticklabels([str(i) for i in range(1, len(ordered_batches) + 1)], fontsize=9)
+            ax.set_xticklabels(ordered_batches, rotation=45, ha="right", fontsize=9)
             ax.set_ylabel(f)
-            ax.set_xlabel("Batch Sequence", fontsize=10)
+            ax.set_xlabel("Batch No.", fontsize=10)
             ax.set_title(f"Analysis: {f} (LAB vs LINE)", fontsize=14, fontweight="bold", pad=12)
             ax.grid(axis="y", color="#bfbfbf", linestyle="-", linewidth=0.8)
             ax.grid(axis="x", visible=False)
@@ -1271,17 +1271,9 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 handlelength=2.0, columnspacing=1.2, handletextpad=0.5
             )
 
-            fig.subplots_adjust(bottom=0.22, right=0.96)
+            fig.subplots_adjust(bottom=0.30, right=0.96)
             st.pyplot(fig)
             plt.close(fig)
-
-            # Clean batch-sequence mapping shown OUTSIDE the chart area
-            map_df = pd.DataFrame({
-                "Seq": list(range(1, len(ordered_batches) + 1)),
-                "Batch No.": ordered_batches
-            })
-            st.caption("Batch sequence mapping")
-            st.dataframe(map_df, hide_index=True, use_container_width=True)
 
         with col_table:
             current_lab = (
