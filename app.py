@@ -1192,6 +1192,46 @@ elif app_mode == "🎛️ Control Limit Calculator":
         use_container_width=True,
     )
 
+    # Download the Task 3 statistical summary table for the selected color
+    _safe_color_name = re.sub(r'[^A-Za-z0-9._-]+', '_', str(color)).strip('_') or 'Color'
+
+    _xlsx_buf = io.BytesIO()
+    with pd.ExcelWriter(_xlsx_buf, engine="openpyxl") as writer:
+        task3_stats_df.to_excel(writer, index=False, sheet_name="LAB_LINE_Stats")
+        ws = writer.book["LAB_LINE_Stats"]
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+        for col_cells in ws.columns:
+            max_len = 0
+            col_letter = col_cells[0].column_letter
+            for cell in col_cells:
+                cell_val = "" if cell.value is None else str(cell.value)
+                max_len = max(max_len, len(cell_val))
+            ws.column_dimensions[col_letter].width = min(max(max_len + 2, 12), 28)
+    _xlsx_buf.seek(0)
+
+    _csv_buf = task3_stats_df.to_csv(index=False).encode("utf-8-sig")
+
+    _dl_col1, _dl_col2, _dl_spacer = st.columns([1, 1, 2])
+    with _dl_col1:
+        st.download_button(
+            label="📥 Download Table (Excel)",
+            data=_xlsx_buf,
+            file_name=f"{_safe_color_name}_LAB_LINE_Stats_1.5Sigma.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key=f"task3_stats_xlsx_{_safe_color_name}",
+            use_container_width=True,
+        )
+    with _dl_col2:
+        st.download_button(
+            label="📥 Download Table (CSV)",
+            data=_csv_buf,
+            file_name=f"{_safe_color_name}_LAB_LINE_Stats_1.5Sigma.csv",
+            mime="text/csv",
+            key=f"task3_stats_csv_{_safe_color_name}",
+            use_container_width=True,
+        )
+
     st.markdown("---")
 
     # ---------------------------------------------------------
