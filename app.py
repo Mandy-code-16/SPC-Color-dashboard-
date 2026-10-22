@@ -1208,13 +1208,13 @@ elif app_mode == "🎛️ Control Limit Calculator":
             ax.plot(
                 x, pair_f["LINE"].values,
                 marker="D", linestyle="-", linewidth=1.6, markersize=5.5,
-                color="#5b9bd5", markerfacecolor="#5b9bd5", markeredgewidth=0,
+                color="#ed7d31", markerfacecolor="#ed7d31", markeredgewidth=0,
                 label="LINE Output"
             )
             ax.plot(
                 x, pair_f["LAB"].values,
                 marker="s", linestyle="-", linewidth=1.6, markersize=5.5,
-                color="#ed7d31", markerfacecolor="#ed7d31", markeredgewidth=0,
+                color="#5b9bd5", markerfacecolor="#5b9bd5", markeredgewidth=0,
                 label="LAB Input"
             )
 
