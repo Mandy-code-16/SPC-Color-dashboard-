@@ -79,9 +79,23 @@ def read_uploaded_table(file_bytes, file_name):
                 last_error = e
         raise last_error
 
-    if name.endswith((".xlsx", ".xls")):
+    if name.endswith(".xlsx"):
         bio.seek(0)
-        return pd.read_excel(bio)
+        try:
+            return pd.read_excel(bio, engine="openpyxl")
+        except ImportError as e:
+            raise ImportError(
+                "Missing Excel reader 'openpyxl'. Please add openpyxl to requirements.txt and redeploy the app."
+            ) from e
+
+    if name.endswith(".xls"):
+        bio.seek(0)
+        try:
+            return pd.read_excel(bio, engine="xlrd")
+        except ImportError as e:
+            raise ImportError(
+                "Missing Excel reader 'xlrd'. Please add xlrd to requirements.txt and redeploy the app."
+            ) from e
 
     raise ValueError("Unsupported file format. Please upload CSV, XLSX, or XLS.")
 
@@ -163,6 +177,15 @@ numeric_columns = [
 for col in numeric_columns:
     if col in df_raw.columns:
         df_raw[col] = pd.to_numeric(df_raw[col], errors='coerce')
+
+# =========================
+# DISPLAY LABELS (CIELAB notation)
+# Keep raw/internal keys unchanged so source-file column names still work.
+# =========================
+DELTA_DISPLAY = {"ΔL": "ΔL*", "Δa": "Δa*", "Δb": "Δb*", "ΔE": "ΔE*"}
+
+def delta_label(value):
+    return DELTA_DISPLAY.get(value, value)
 
 # =========================
 # HELPER FUNCTIONS
@@ -572,7 +595,7 @@ if app_mode == "🚀 Main Dashboard":
                 n_all = len(df_overall)
                 
                 row = {
-                    "Factor": f"**{k}**",
+                    "Factor": f"**{delta_label(k)}**",
                     "Overall Mean": f"{m_all:.3f}",
                     "Phase II Mean": "-",
                     "Overall Std": f"{s_all:.3f}",
@@ -632,7 +655,7 @@ if app_mode == "🚀 Main Dashboard":
     df_summary_lab = build_comparison_table("lab")
 
     st.markdown("### 📋 Executive Performance Summary (Overall vs. Phase II)")
-    st.info("💡 **How to read:** Arrows (↓) in Phase II indicate a percentage reduction in color drift (Mean ΔE) or process variation (Std). **Lower is better.**")
+    st.info("💡 **How to read:** Arrows (↓) in Phase II indicate a percentage reduction in color drift (Mean ΔE*) or process variation (Std). **Lower is better.**")
     
     col_sum1, col_sum2 = st.columns(2)
     with col_sum1: 
@@ -667,7 +690,11 @@ if app_mode == "🚀 Main Dashboard":
             batch_summary["LINE_Δa"] = batch_summary[["LINE_Δa_N", "LINE_Δa_S"]].mean(axis=1)
             batch_summary["LINE_Δb"] = batch_summary[["LINE_Δb_N", "LINE_Δb_S"]].mean(axis=1)
             display_cols = ["製造批號", "First_Time", "LAB_ΔL", "LAB_Δa", "LAB_Δb", "LINE_ΔL", "LINE_Δa", "LINE_Δb", "Rows_in_Batch"]
-            st.dataframe(batch_summary[display_cols], use_container_width=True, hide_index=True)
+            batch_summary_display = batch_summary[display_cols].rename(columns={
+                "LAB_ΔL": "LAB_ΔL*", "LAB_Δa": "LAB_Δa*", "LAB_Δb": "LAB_Δb*",
+                "LINE_ΔL": "LINE_ΔL*", "LINE_Δa": "LINE_Δa*", "LINE_Δb": "LINE_Δb*"
+            })
+            st.dataframe(batch_summary_display, use_container_width=True, hide_index=True)
         else:
             st.warning("No data after filtering.")
 
@@ -675,7 +702,7 @@ if app_mode == "🚀 Main Dashboard":
     for k in ["ΔL", "Δa", "Δb"]:
         lab_lim = safe_get_limit(color, "LAB", k)
         line_lim = safe_get_limit(color, "LINE", k)
-        fig = spc_combined(spc_data[k]["lab"], spc_data[k]["line"], f"COMBINED {k}", lab_lim, line_lim, control_batch_code, global_batch_order)
+        fig = spc_combined(spc_data[k]["lab"], spc_data[k]["line"], f"COMBINED {delta_label(k)}", lab_lim, line_lim, control_batch_code, global_batch_order)
         st.pyplot(fig); download(fig, f"COMBINED_{color}_{k}.png")
 
     st.markdown("---")
@@ -683,7 +710,7 @@ if app_mode == "🚀 Main Dashboard":
     for k in ["ΔL", "Δa", "Δb"]:
         lab_lim = safe_get_limit(color, "LAB", k)
         line_lim = safe_get_limit(color, "LINE", k)
-        fig = spc_combined_phase2(spc_data[k]["lab"], spc_data[k]["line"], f"{k} – LAB + LINE (Phase II)", lab_lim, line_lim, control_batch_code, control_time, global_batch_order)
+        fig = spc_combined_phase2(spc_data[k]["lab"], spc_data[k]["line"], f"{delta_label(k)} – LAB + LINE (Phase II)", lab_lim, line_lim, control_batch_code, control_time, global_batch_order)
         if fig is not None: st.pyplot(fig); download(fig, f"COMBINED_PHASE2_{color}_{k}.png")
         else: st.info(f"{k}: Not enough Phase II data")
 
@@ -708,7 +735,7 @@ if app_mode == "🚀 Main Dashboard":
             if lcl is not None: ax.axvline(lcl, color="red", linestyle="--", linewidth=1.5, label="LSL")
             if ucl is not None: ax.axvline(ucl, color="red", linestyle="--", linewidth=1.5, label="USL")
             ax.text(0.02, 0.95, f"N = {len(values)}\nMean = {mean:.3f}\nStd = {std:.3f}", transform=ax.transAxes, va="top", fontsize=9, bbox=dict(facecolor="white", alpha=0.9))
-            ax.set_title(f"{k} (LINE)"); ax.grid(axis="y", alpha=0.3); ax.legend(fontsize=8); st.pyplot(fig)
+            ax.set_title(f"{delta_label(k)} (LINE)"); ax.grid(axis="y", alpha=0.3); ax.legend(fontsize=8); st.pyplot(fig)
             buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=150, bbox_inches="tight"); buf.seek(0)
             st.download_button("⬇ Download", data=buf, file_name=f"{k}_line_dist.png", mime="image/png", key=f"dl_line_dist_{k}")
 
@@ -732,7 +759,7 @@ if app_mode == "🚀 Main Dashboard":
             if lcl is not None: ax.axvline(lcl, color="red", linestyle="--", linewidth=1.5, label="LSL")
             if ucl is not None: ax.axvline(ucl, color="red", linestyle="--", linewidth=1.5, label="USL")
             ax.text(0.02, 0.95, f"N = {len(values)}\nMean = {mean:.3f}\nStd = {std:.3f}", transform=ax.transAxes, va="top", fontsize=9, bbox=dict(facecolor="white", alpha=0.9))
-            ax.set_title(f"{k} (LAB)"); ax.grid(axis="y", alpha=0.3); ax.legend(fontsize=8); st.pyplot(fig)
+            ax.set_title(f"{delta_label(k)} (LAB)"); ax.grid(axis="y", alpha=0.3); ax.legend(fontsize=8); st.pyplot(fig)
             buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=150, bbox_inches="tight"); buf.seek(0)
             st.download_button("⬇ Download", data=buf, file_name=f"{k}_lab_dist.png", mime="image/png", key=f"dl_lab_dist_{k}")
 
@@ -746,14 +773,14 @@ if app_mode == "🚀 Main Dashboard":
             line_phase2 = spc_data[k]["line"][spc_data[k]["line"]["Time"] >= control_time]
             ooc_line = detect_out_of_control(line_phase2, lcl, ucl)
             for _, r in ooc_line.iterrows(): 
-                ooc_rows.append({"Factor": k, "Type": "LINE", "Batch No.": r["製造批號"], "Value": round(r["value"], 2), "Rule_CL": r["Rule_CL"], "Rule_3Sigma": r["Rule_3Sigma"]})
+                ooc_rows.append({"Factor": delta_label(k), "Type": "LINE", "Batch No.": r["製造批號"], "Value": round(r["value"], 2), "Rule_CL": r["Rule_CL"], "Rule_3Sigma": r["Rule_3Sigma"]})
         
         lcl, ucl = safe_get_limit(color, "LAB", k)
         if control_time is not None:
             lab_phase2 = spc_data[k]["lab"][spc_data[k]["lab"]["Time"] >= control_time]
             ooc_lab = detect_out_of_control(lab_phase2, lcl, ucl)
             for _, r in ooc_lab.iterrows(): 
-                ooc_rows.append({"Factor": k, "Type": "LAB", "Batch No.": r["製造批號"], "Value": round(r["value"], 2), "Rule_CL": r["Rule_CL"], "Rule_3Sigma": r["Rule_3Sigma"]})
+                ooc_rows.append({"Factor": delta_label(k), "Type": "LAB", "Batch No.": r["製造批號"], "Value": round(r["value"], 2), "Rule_CL": r["Rule_CL"], "Rule_3Sigma": r["Rule_3Sigma"]})
     
     if ooc_rows: 
         ooc_df = pd.DataFrame(ooc_rows)
@@ -800,31 +827,31 @@ if app_mode == "🚀 Main Dashboard":
         if df_plot.empty:
             st.warning("⚠️ No data available for the selected time period.")
         else:
-            st.subheader("📊 Average Thickness vs ΔE (Each Point = 1 Coil)")
+            st.subheader("📊 Average Thickness vs ΔE* (Each Point = 1 Coil)")
             fig, ax = plt.subplots(figsize=(10, 6))
             ax.scatter(df_plot[thickness_col], df_plot[dE_col], alpha=0.75)
             if len(df_plot) > 0: 
-                ax.axhline(df_plot[dE_col].mean(), linestyle="--", linewidth=2, label=f"Mean ΔE = {df_plot[dE_col].mean():.2f}")
+                ax.axhline(df_plot[dE_col].mean(), linestyle="--", linewidth=2, label=f"Mean ΔE* = {df_plot[dE_col].mean():.2f}")
             ax.set_xlabel("Average Thickness")
-            ax.set_ylabel("ΔE")
+            ax.set_ylabel("ΔE*")
             ax.set_title("Thickness – Color Relationship per Coil")
             ax.legend()
             ax.grid(True, linestyle="--", alpha=0.4)
             st.pyplot(fig)
 
-            st.subheader("📈 ΔE Distribution (Per Coil)")
+            st.subheader("📈 ΔE* Distribution (Per Coil)")
             fig2, ax2 = plt.subplots(figsize=(10, 4))
             data_de = df_plot[dE_col].dropna()
             if len(data_de) > 0:
                 mean_de, std_de = data_de.mean(), data_de.std()
-                ax2.hist(data_de, bins=20, density=True, alpha=0.7, edgecolor="black", label="ΔE Histogram")
+                ax2.hist(data_de, bins=20, density=True, alpha=0.7, edgecolor="black", label="ΔE* Histogram")
                 if std_de > 0:
                     x_de = np.linspace(mean_de - 5*std_de, mean_de + 5*std_de, 1000)
                     ax2.plot(x_de, normal_pdf(x_de, mean_de, std_de), linewidth=3, label="Normal Distribution")
                 ax2.axvline(mean_de, linestyle="--", linewidth=2, label=f"Mean = {mean_de:.2f}")
-                ax2.set_xlabel("ΔE")
+                ax2.set_xlabel("ΔE*")
                 ax2.set_ylabel("Density")
-                ax2.set_title("ΔE Distribution")
+                ax2.set_title("ΔE* Distribution")
                 ax2.legend()
                 ax2.grid(True, linestyle="--", alpha=0.4)
                 st.pyplot(fig2)
@@ -873,7 +900,7 @@ if app_mode == "🚀 Main Dashboard":
                     if not available_factors:
                         st.warning("⚠ No color factor columns found in dataset.")
                     else:
-                        factor_label = st.selectbox("🎯 Select Color Factor", list(available_factors.keys()), index=0, key="bottom_color_factor")
+                        factor_label = st.selectbox("🎯 Select Color Factor", list(available_factors.keys()), index=0, format_func=delta_label, key="bottom_color_factor")
                         factor_col = available_factors[factor_label]
                         coil_df = df_p2.groupby("Coil No.", as_index=False).agg({"Avergage Thickness": "mean", factor_col: "mean", "製造批號": "min"}).dropna()
                         
@@ -896,9 +923,9 @@ if app_mode == "🚀 Main Dashboard":
                             if r2 is not None: 
                                 ax.plot(np.linspace(x.min(), x.max(), 100), slope * np.linspace(x.min(), x.max(), 100) + intercept, linestyle="--", linewidth=2, label=f"Regression Line (R² = {r2:.3f})")
                             
-                            ax.set_title(f"Phase II – Per Coil Analysis\nThickness vs {factor_label}" + (f" | r = {coil_df['Avergage Thickness'].corr(coil_df[factor_col]):.3f}, R² = {r2:.3f}" if r2 is not None else ""))
+                            ax.set_title(f"Phase II – Per Coil Analysis\nThickness vs {delta_label(factor_label)}" + (f" | r = {coil_df['Avergage Thickness'].corr(coil_df[factor_col]):.3f}, R² = {r2:.3f}" if r2 is not None else ""))
                             ax.set_xlabel("Average Thickness (per Coil)")
-                            ax.set_ylabel(factor_label)
+                            ax.set_ylabel(delta_label(factor_label))
                             ax.legend()
                             ax.grid(True, linestyle="--", alpha=0.4)
                             st.pyplot(fig)
@@ -1100,7 +1127,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
     st.markdown(
         """
         <div class="task3-note">
-        <b>Analysis objective:</b> define suitable <b>incoming LAB control limits</b> for ΔL / Δa / Δb,
+        <b>Analysis objective:</b> define suitable <b>incoming LAB control limits</b> for ΔL* / Δa* / Δb*,
         while using the corresponding <b>LINE output</b> from the same production batch to verify the downstream color trend.
         LAB and LINE are therefore analyzed together; no source selection is required.
         </div>
@@ -1141,7 +1168,12 @@ elif app_mode == "🎛️ Control Limit Calculator":
             "LAB_ΔL", "LINE_ΔL",
             "LAB_Δa", "LINE_Δa",
             "LAB_Δb", "LINE_Δb"
-        ]].rename(columns={"製造批號": "Batch No."})
+        ]].rename(columns={
+            "製造批號": "Batch No.",
+            "LAB_ΔL": "LAB_ΔL*", "LINE_ΔL": "LINE_ΔL*",
+            "LAB_Δa": "LAB_Δa*", "LINE_Δa": "LINE_Δa*",
+            "LAB_Δb": "LAB_Δb*", "LINE_Δb": "LINE_Δb*"
+        })
 
         st.caption(
             f"Color Code: {color} | Paired batches: {len(display_paired)} | "
@@ -1149,9 +1181,9 @@ elif app_mode == "🎛️ Control Limit Calculator":
         )
         st.dataframe(
             display_paired.style.format({
-                "LAB_ΔL": "{:.3f}", "LINE_ΔL": "{:.3f}",
-                "LAB_Δa": "{:.3f}", "LINE_Δa": "{:.3f}",
-                "LAB_Δb": "{:.3f}", "LINE_Δb": "{:.3f}"
+                "LAB_ΔL*": "{:.3f}", "LINE_ΔL*": "{:.3f}",
+                "LAB_Δa*": "{:.3f}", "LINE_Δa*": "{:.3f}",
+                "LAB_Δb*": "{:.3f}", "LINE_Δb*": "{:.3f}"
             }, na_rep=""),
             hide_index=True,
             use_container_width=True
@@ -1165,19 +1197,19 @@ elif app_mode == "🎛️ Control Limit Calculator":
     dE_iqr_sq = 0.0
 
     for f in factors:
-        st.markdown(f"## 📊 {f}: LAB Input vs LINE Output")
+        st.markdown(f"## 📊 {delta_label(f)}: LAB Input vs LINE Output")
 
         col_sig, col_iqr = st.columns(2)
         with col_sig:
             sig = st.number_input(
-                f"Sigma (K) for incoming LAB {f}",
+                f"Sigma (K) for incoming LAB {delta_label(f)}",
                 value=3.0,
                 step=0.1,
                 key=f"paired_sig_{f}"
             )
         with col_iqr:
             iqr_k = st.number_input(
-                f"IQR sensitivity for incoming LAB {f}",
+                f"IQR sensitivity for incoming LAB {delta_label(f)}",
                 value=1.5,
                 step=0.1,
                 key=f"paired_iqr_{f}"
@@ -1324,9 +1356,9 @@ elif app_mode == "🎛️ Control Limit Calculator":
 
             ax.set_xticks(x)
             ax.set_xticklabels(ordered_batches, rotation=35, ha="right", fontsize=9)
-            ax.set_ylabel(f)
+            ax.set_ylabel(delta_label(f))
             ax.set_xlabel("Batch No.", fontsize=10, labelpad=10)
-            ax.set_title(f"Analysis: {f} (LAB vs LINE)", fontsize=14, fontweight="bold", pad=12)
+            ax.set_title(f"Analysis: {delta_label(f)} (LAB vs LINE)", fontsize=14, fontweight="bold", pad=12)
             ax.grid(axis="y", color="#bfbfbf", linestyle="-", linewidth=0.8)
             ax.grid(axis="x", visible=False)
 
@@ -1459,22 +1491,22 @@ elif app_mode == "🎛️ Control Limit Calculator":
         # Existing project target for incoming LAB color difference.
         lab_de_target = 0.5
 
-        st.markdown("### 🎯 Incoming LAB ΔE Boundary Check")
+        st.markdown("### 🎯 Incoming LAB ΔE* Boundary Check")
         c1, c2, c3 = st.columns(3)
-        c1.metric("Standard-derived ΔE", f"{dE_std:.3f}")
-        c2.metric("IQR-derived ΔE", f"{dE_iqr:.3f}")
-        c3.metric("Recommended ΔE", f"{dE_rec:.3f}" if dE_rec is not None else "N/A")
+        c1.metric("Standard-derived ΔE*", f"{dE_std:.3f}")
+        c2.metric("IQR-derived ΔE*", f"{dE_iqr:.3f}")
+        c3.metric("Recommended ΔE*", f"{dE_rec:.3f}" if dE_rec is not None else "N/A")
 
         if dE_rec is None:
             st.warning("At least one factor has no overlap between Standard and IQR; review that factor before setting the incoming LAB limit.")
         elif dE_rec <= lab_de_target:
             st.success(
-                f"✅ Recommended incoming LAB component limits produce a derived ΔE boundary of {dE_rec:.3f}, "
+                f"✅ Recommended incoming LAB component limits produce a derived ΔE* boundary of {dE_rec:.3f}, "
                 f"within the current LAB target ≤ {lab_de_target}."
             )
         else:
             st.warning(
-                f"⚠ Recommended incoming LAB component limits produce a derived ΔE boundary of {dE_rec:.3f}, "
+                f"⚠ Recommended incoming LAB component limits produce a derived ΔE* boundary of {dE_rec:.3f}, "
                 f"above the current LAB target {lab_de_target}. Further tightening should be reviewed."
             )
 
@@ -1493,7 +1525,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
         st.markdown("### 📄 Export Task 3 Word Report")
         st.caption(
             "The Word report includes the paired LAB–LINE analysis, calculated incoming LAB limits, "
-            "correlation results, summary table, and the current ΔL / Δa / Δb charts."
+            "correlation results, summary table, and the current ΔL* / Δa* / Δb* charts."
         )
 
         def build_task3_word_report():
@@ -1530,7 +1562,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
 
             doc.add_heading("1. Analysis Objective", level=1)
             doc.add_paragraph(
-                "Determine a practical incoming LAB control range for ΔL, Δa and Δb, and use the paired "
+                "Determine a practical incoming LAB control range for ΔL*, Δa* and Δb*, and use the paired "
                 "LINE output from the same production batches to evaluate the downstream color trend. "
                 "The recommended LAB range is derived from the overlap between the Standard (Mean ± Kσ) "
                 "and IQR methods using LAB data associated with acceptable LINE output whenever current "
@@ -1632,7 +1664,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
                     for i, value in enumerate(vals):
                         row[i].text = value
 
-                # Derived ΔE results, using the same values already calculated in the app.
+                # Derived ΔE* results, using the same values already calculated in the app.
                 dE_std_report = math.sqrt(dE_std_sq)
                 dE_iqr_report = math.sqrt(dE_iqr_sq)
                 valid_rec = all(
@@ -1647,16 +1679,16 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 else:
                     dE_rec_report = None
 
-                doc.add_heading("5. Derived Incoming LAB ΔE Boundary", level=1)
+                doc.add_heading("5. Derived Incoming LAB ΔE* Boundary", level=1)
                 de_table = doc.add_table(rows=1, cols=2)
                 de_table.style = "Table Grid"
                 de_table.rows[0].cells[0].text = "Item"
                 de_table.rows[0].cells[1].text = "Value"
                 de_rows = [
-                    ("Standard-derived ΔE", f"{dE_std_report:.3f}"),
-                    ("IQR-derived ΔE", f"{dE_iqr_report:.3f}"),
-                    ("Recommended ΔE", f"{dE_rec_report:.3f}" if dE_rec_report is not None else "N/A"),
-                    ("Current LAB ΔE target", "≤ 0.500"),
+                    ("Standard-derived ΔE*", f"{dE_std_report:.3f}"),
+                    ("IQR-derived ΔE*", f"{dE_iqr_report:.3f}"),
+                    ("Recommended ΔE*", f"{dE_rec_report:.3f}" if dE_rec_report is not None else "N/A"),
+                    ("Current LAB ΔE* target", "≤ 0.500"),
                 ]
                 for item, value in de_rows:
                     c = de_table.add_row().cells
@@ -1708,23 +1740,23 @@ elif app_mode == "🎛️ Control Limit Calculator":
     # Manual LAB ΔE calculator
     # ---------------------------------------------------------
     st.markdown("---")
-    st.subheader("🧮 Manual Incoming LAB ΔE Calculator")
+    st.subheader("🧮 Manual Incoming LAB ΔE* Calculator")
     col_ml, col_ma, col_mb = st.columns(3)
     with col_ml:
-        man_L = st.number_input("Incoming LAB ΔL:", value=0.000, step=0.100, format="%.3f")
+        man_L = st.number_input("Incoming LAB ΔL*:", value=0.000, step=0.100, format="%.3f")
     with col_ma:
-        man_a = st.number_input("Incoming LAB Δa:", value=0.000, step=0.100, format="%.3f")
+        man_a = st.number_input("Incoming LAB Δa*:", value=0.000, step=0.100, format="%.3f")
     with col_mb:
-        man_b = st.number_input("Incoming LAB Δb:", value=0.000, step=0.100, format="%.3f")
+        man_b = st.number_input("Incoming LAB Δb*:", value=0.000, step=0.100, format="%.3f")
 
     manual_dE = math.sqrt(man_L ** 2 + man_a ** 2 + man_b ** 2)
     lab_de_target = 0.5
 
     st.markdown("#### Calculation Result")
     if manual_dE <= lab_de_target:
-        st.success(f"### 🎯 Incoming LAB ΔE: **{manual_dE:.3f}** (✅ ≤ {lab_de_target})")
+        st.success(f"### 🎯 Incoming LAB ΔE*: **{manual_dE:.3f}** (✅ ≤ {lab_de_target})")
     else:
-        st.error(f"### 🎯 Incoming LAB ΔE: **{manual_dE:.3f}** (⚠️ > {lab_de_target})")
+        st.error(f"### 🎯 Incoming LAB ΔE*: **{manual_dE:.3f}** (⚠️ > {lab_de_target})")
 
 # =========================================================
 # VIEW 4: LAB VS LINE SCALE-UP ANALYSIS
@@ -2078,7 +2110,7 @@ elif app_mode == "📈 I-MR Chart (Coil-Level)":
     with col_cfg1:
         source_opt = st.radio("Select Data Source:", ["LINE", "LAB"], horizontal=True, key="imr_source")
     with col_cfg2:
-        factor_opt = st.selectbox("Select Color Factor:", ["ΔL", "Δa", "Δb", "ΔE"], key="imr_factor")
+        factor_opt = st.selectbox("Select Color Factor:", ["ΔL", "Δa", "Δb", "ΔE"], format_func=delta_label, key="imr_factor")
 
     # Map the correct column based on user selection
     target_col = None
@@ -2086,7 +2118,7 @@ elif app_mode == "📈 I-MR Chart (Coil-Level)":
 
     if source_opt == "LINE":
         if factor_opt == "ΔE":
-            st.warning("⚠️ ΔE is not directly pre-calculated for LINE in raw data. Please select ΔL, Δa, or Δb.")
+            st.warning("⚠️ ΔE* is not directly pre-calculated for LINE in raw data. Please select ΔL*, Δa*, or Δb*.")
         else:
             col_n, col_s = f"正-北 {factor_opt}", f"正-南 {factor_opt}"
             if col_n in df_imr_base.columns and col_s in df_imr_base.columns:
@@ -2230,8 +2262,8 @@ elif app_mode == "📈 I-MR Chart (Coil-Level)":
                     df_imr[display_cols].rename(columns={
                         "Time": "Timestamp",
                         "製造批號": "Batch No.",
-                        target_col: f"{factor_opt} Value"
-                    }).style.format({f"{factor_opt} Value": "{:.3f}", "MR": "{:.3f}"}, na_rep="-"),
+                        target_col: f"{delta_label(factor_opt)} Value"
+                    }).style.format({f"{delta_label(factor_opt)} Value": "{:.3f}", "MR": "{:.3f}"}, na_rep="-"),
                     use_container_width=True,
                     hide_index=True
                 )
@@ -2250,7 +2282,7 @@ elif app_mode == "🎯 KPI Achievement Report":
     st.info(
         "**KPI logic:** The **Control Start Batch itself is excluded**; KPI evaluation starts from the "
         "**next batch onward**. A post-control batch is counted as OOC only once even if multiple factors "
-        "(ΔL / Δa / Δb) exceed the configured control limits. **Value = LCL or Value = UCL remains IN CONTROL**; "
+        "(ΔL* / Δa* / Δb*) exceed the configured control limits. **Value = LCL or Value = UCL remains IN CONTROL**; "
         "OOC is counted only when **Value < LCL** or **Value > UCL**. The original tasks and their 3-Sigma logic "
         "remain unchanged. This KPI report uses only configured LCL/UCL breaches."
     )
