@@ -981,150 +981,317 @@ elif app_mode == "📋 Limit Status Summary":
 
 # =========================================================
 # VIEW 3: CONTROL LIMIT CALCULATOR
+# GOAL: Define incoming LAB limits that help control LINE output color trend
 # =========================================================
 elif app_mode == "🎛️ Control Limit Calculator":
-    
-    st.title("🎛️ Control Limits Analysis & Derived ΔE")
-    
-    with st.expander("⚙️ Data Source Settings", expanded=True):
-        st.markdown("**Select Data Source:**")
-        calc_source = st.radio("Data Source", ["LINE", "LAB"], horizontal=True)
 
-    # =========================================================
-    # VIEW 3 - LOADED DATA TABLE (BATCH-LEVEL DATA USED IN CALC)
-    # =========================================================
-    st.markdown("### 📋 Loaded Data Used for Control Limit Calculation")
+    # Task 3 specific clean theme (remove yellow background in this view only)
+    st.markdown(
+        """
+        <style>
+        .stApp {
+            background: #f6f8fb !important;
+            animation: none !important;
+        }
+        div[data-testid="stNumberInput"] input {
+            background-color: #ffffff !important;
+            border: 1px solid #d7dee8 !important;
+        }
+        div[data-testid="stDataFrame"] {
+            border: 1px solid #e3e8ef;
+            border-radius: 10px;
+            overflow: hidden;
+            background: white;
+        }
+        .task3-note {
+            padding: 12px 16px;
+            background: #eef6ff;
+            border: 1px solid #cfe3f7;
+            border-radius: 10px;
+            margin-bottom: 16px;
+            color: #163a5f;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
 
-    source_key = calc_source.lower()
-    calc_data_table = None
-    time_cols = []
+    st.title("🎛️ Incoming LAB Control Limit → LINE Output Trend")
+    st.markdown(
+        """
+        <div class="task3-note">
+        <b>Analysis objective:</b> define suitable <b>incoming LAB control limits</b> for ΔL / Δa / Δb,
+        while using the corresponding <b>LINE output</b> from the same production batch to verify the downstream color trend.
+        LAB and LINE are therefore analyzed together; no source selection is required.
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
-    for _f in ["ΔL", "Δa", "Δb"]:
-        _tmp = spc_data[_f][source_key][["製造批號", "Time", "value"]].copy()
-        _time_col = f"Time_{_f}"
-        time_cols.append(_time_col)
-        _tmp = _tmp.rename(columns={"Time": _time_col, "value": _f})
+    factors = ["ΔL", "Δa", "Δb"]
 
-        if calc_data_table is None:
-            calc_data_table = _tmp
-        else:
-            calc_data_table = calc_data_table.merge(_tmp, on="製造批號", how="outer")
+    # ---------------------------------------------------------
+    # Build paired LAB + LINE batch-level dataset
+    # ---------------------------------------------------------
+    paired_all = None
+    for _f in factors:
+        _lab = spc_data[_f]["lab"][["製造批號", "Time", "value"]].copy().rename(
+            columns={"Time": f"Time_LAB_{_f}", "value": f"LAB_{_f}"}
+        )
+        _line = spc_data[_f]["line"][["製造批號", "Time", "value"]].copy().rename(
+            columns={"Time": f"Time_LINE_{_f}", "value": f"LINE_{_f}"}
+        )
+        _pair = _lab.merge(_line, on="製造批號", how="inner")
+        paired_all = _pair if paired_all is None else paired_all.merge(_pair, on="製造批號", how="inner")
 
-    if calc_data_table is not None and not calc_data_table.empty:
-        for _tc in time_cols:
-            calc_data_table[_tc] = pd.to_datetime(calc_data_table[_tc], errors="coerce")
+    st.markdown("### 📋 Paired Batch Data — LAB Input vs LINE Output")
 
-        # All three factors are calculated at batch level. Use the earliest valid
-        # timestamp only for display/sorting; the values themselves are untouched.
-        calc_data_table["Time"] = calc_data_table[time_cols].min(axis=1)
-        calc_data_table = calc_data_table.drop(columns=time_cols)
-        calc_data_table = calc_data_table[["製造批號", "Time", "ΔL", "Δa", "Δb"]]
-        calc_data_table = calc_data_table.sort_values(["Time", "製造批號"]).reset_index(drop=True)
-        calc_data_table = calc_data_table.rename(columns={"製造批號": "Batch No."})
+    if paired_all is None or paired_all.empty:
+        st.warning("No paired LAB + LINE batch data are available after the current filters.")
+        paired_all = pd.DataFrame()
+    else:
+        _time_cols = [c for c in paired_all.columns if c.startswith("Time_")]
+        for _c in _time_cols:
+            paired_all[_c] = pd.to_datetime(paired_all[_c], errors="coerce")
+        paired_all["Time"] = paired_all[_time_cols].min(axis=1)
+        paired_all = paired_all.sort_values(["Time", "製造批號"]).reset_index(drop=True)
+
+        display_paired = paired_all[[
+            "製造批號", "Time",
+            "LAB_ΔL", "LINE_ΔL",
+            "LAB_Δa", "LINE_Δa",
+            "LAB_Δb", "LINE_Δb"
+        ]].rename(columns={"製造批號": "Batch No."})
 
         st.caption(
-            f"Color Code: {color} | Source: {calc_source} | "
-            f"Batches shown: {len(calc_data_table)} | Data level: Batch average"
+            f"Color Code: {color} | Paired batches: {len(display_paired)} | "
+            "Each row contains incoming LAB and production LINE results from the same batch."
         )
         st.dataframe(
-            calc_data_table.style.format({"ΔL": "{:.3f}", "Δa": "{:.3f}", "Δb": "{:.3f}"}, na_rep=""),
+            display_paired.style.format({
+                "LAB_ΔL": "{:.3f}", "LINE_ΔL": "{:.3f}",
+                "LAB_Δa": "{:.3f}", "LINE_Δa": "{:.3f}",
+                "LAB_Δb": "{:.3f}", "LINE_Δb": "{:.3f}"
+            }, na_rep=""),
             hide_index=True,
             use_container_width=True
         )
-        st.caption(
-            "This is the batch-level dataset used by View 3 after the current Color / Year / Month filters. "
-            "Missing component values are left blank and are not included in that factor's control-limit calculation."
-        )
-    else:
-        st.warning("No loaded batch-level data available for the current filters and selected source.")
-        
+
     st.markdown("---")
 
-    factors = ["ΔL", "Δa", "Δb"]
     calc_res = {}
-    dE_std_sq, dE_iqr_sq = 0, 0
+    dE_std_sq = 0.0
+    dE_iqr_sq = 0.0
 
     for f in factors:
-        st.markdown(f"### 📊 Analysis: **{f}** ({calc_source})")
-        
+        st.markdown(f"## 📊 {f}: LAB Input vs LINE Output")
+
         col_sig, col_iqr = st.columns(2)
         with col_sig:
-            sig = st.number_input(f"🔸 Sigma (K) for {f}", value=3.0, step=0.1, key=f"sig_{f}")
+            sig = st.number_input(
+                f"Sigma (K) for incoming LAB {f}",
+                value=3.0,
+                step=0.1,
+                key=f"paired_sig_{f}"
+            )
         with col_iqr:
-            iqr_k = st.number_input(f"🔸 IQR Sens. for {f}", value=1.5, step=0.1, key=f"iqr_{f}")
-        
-        d = spc_data[f][calc_source.lower()]["value"]
-        
-        if len(d) >= 3:
-            m, s = d.mean(), d.std()
-            q1, q3 = d.quantile(0.25), d.quantile(0.75)
-            olcl, oucl = safe_get_limit(color, calc_source, f)
-            
-            std_lcl, std_ucl = m - sig*s, m + sig*s
-            iqr_lcl, iqr_ucl = q1 - iqr_k*(q3-q1), q3 + iqr_k*(q3-q1)
-            
-            calc_res[f] = {
-                "data": d, "batch": spc_data[f][calc_source.lower()]["製造批號"], "m": m, "s": s, "median": d.median(),
-                "sig": sig, "iqr_k": iqr_k, "olcl": olcl, "oucl": oucl, "std_lcl": std_lcl, "std_ucl": std_ucl, "iqr_lcl": iqr_lcl, "iqr_ucl": iqr_ucl
-            }
-            
-            dE_std_sq += max(abs(std_lcl), abs(std_ucl))**2
-            dE_iqr_sq += max(abs(iqr_lcl), abs(iqr_ucl))**2
+            iqr_k = st.number_input(
+                f"IQR sensitivity for incoming LAB {f}",
+                value=1.5,
+                step=0.1,
+                key=f"paired_iqr_{f}"
+            )
 
-            col_chart, col_table = st.columns([2.2, 1])
-            res = calc_res[f]
-            
-            with col_table:
-                olcl_str = f"{res['olcl']:.3f}" if pd.notnull(res['olcl']) else "None"
-                oucl_str = f"{res['oucl']:.3f}" if pd.notnull(res['oucl']) else "None"
-                
-                df_table = pd.DataFrame([
-                    {"Method": "0. Spec (Sheet)", "Min": olcl_str, "Max": oucl_str, "Center": "-", "Note": "Current Target"},
-                    {"Method": f"1. Standard ({res['sig']}σ)", "Min": f"{res['std_lcl']:.3f}", "Max": f"{res['std_ucl']:.3f}", "Center": f"{res['m']:.3f}", "Note": "Basic Stats"},
-                    {"Method": f"2. IQR (k={res['iqr_k']})", "Min": f"{res['iqr_lcl']:.3f}", "Max": f"{res['iqr_ucl']:.3f}", "Center": f"{res['median']:.3f}", "Note": "Robust Fence"}
-                ])
-                st.dataframe(df_table, hide_index=True, use_container_width=True)
-                st.info(f"**Stats:** μ={res['m']:.3f} | σ={res['s']:.3f} | n={len(res['data'])}")
-
-            with col_chart:
-                fig, ax = plt.subplots(figsize=(10, 4.5))
-                ax.set_facecolor('#f2f2f2')
-
-                x_vals = [global_batch_order.index(b) for b in res["batch"] if b in global_batch_order]
-                y_vals = res["data"][res["batch"].isin(global_batch_order)].values
-                if x_vals: x_vals, y_vals = zip(*sorted(zip(x_vals, y_vals)))
-
-                ax.plot(x_vals, y_vals, marker="o", color="#808080", linestyle="-", linewidth=1.5, markersize=7, alpha=0.5, label="Process Data")
-                
-                if pd.notnull(res["olcl"]):
-                    ax.axhline(res["olcl"], color="black", linestyle="-", linewidth=1.5, label="0. Spec")
-                    ax.axhline(res["oucl"], color="black", linestyle="-", linewidth=1.5)
-                ax.axhline(res["std_lcl"], color="#d62728", linestyle="--", linewidth=1.5, label=f"1. Std (±{res['sig']}σ)")
-                ax.axhline(res["std_ucl"], color="#d62728", linestyle="--", linewidth=1.5)
-                ax.axhline(res["iqr_lcl"], color="#1f77b4", linestyle=":", linewidth=2, label=f"2. IQR (k={res['iqr_k']})")
-                ax.axhline(res["iqr_ucl"], color="#1f77b4", linestyle=":", linewidth=2)
-                ax.axhline(res["m"], color="#2ca02c", linestyle="-.", alpha=0.5, label="Mean")
-                
-                if x_vals:
-                    ax.set_xticks(x_vals)
-                    ax.set_xticklabels([global_batch_order[i] for i in x_vals], rotation=45)
-
-                ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=9, frameon=True, edgecolor="black")
-                ax.grid(axis="y", color="#cccccc", linestyle="-", linewidth=1)
-                ax.grid(axis="x", visible=False)
-                fig.subplots_adjust(right=0.75, bottom=0.2)
-                st.pyplot(fig)
-                plt.close(fig)
+        if paired_all.empty:
+            st.warning(f"Not enough paired LAB + LINE data for {f}.")
             st.markdown("---")
-        else:
-            st.warning(f"Not enough data for {f} (min 3 batches).")
+            continue
 
+        pair_f = paired_all[["製造批號", "Time", f"LAB_{f}", f"LINE_{f}"]].dropna().copy()
+        pair_f = pair_f.rename(columns={f"LAB_{f}": "LAB", f"LINE_{f}": "LINE"})
+
+        if len(pair_f) < 3:
+            st.warning(f"Not enough paired data for {f} (minimum 3 batches).")
+            st.markdown("---")
+            continue
+
+        # Existing sheet limits. LAB = incoming control target, LINE = output validation target.
+        lab_lcl_sheet, lab_ucl_sheet = safe_get_limit(color, "LAB", f)
+        line_lcl_sheet, line_ucl_sheet = safe_get_limit(color, "LINE", f)
+
+        # Use LINE in-control batches to learn which incoming LAB values are associated
+        # with acceptable downstream output. If LINE limits are unavailable, use all pairs.
+        if line_lcl_sheet is not None and line_ucl_sheet is not None:
+            pair_f["LINE_Status"] = np.where(
+                (pair_f["LINE"] >= line_lcl_sheet) & (pair_f["LINE"] <= line_ucl_sheet),
+                "In Control",
+                "OOC"
+            )
+            safe_lab = pair_f.loc[pair_f["LINE_Status"] == "In Control", "LAB"].dropna()
+            filter_note = (
+                f"LAB candidate limits are calculated from paired batches whose LINE output is within "
+                f"the current LINE range [{line_lcl_sheet:.3f}, {line_ucl_sheet:.3f}]."
+            )
+        else:
+            pair_f["LINE_Status"] = "No LINE limit"
+            safe_lab = pair_f["LAB"].dropna()
+            filter_note = (
+                "Current LINE control limits are not configured, so all paired batches are used for the LAB calculation."
+            )
+
+        if len(safe_lab) < 3:
+            # Avoid unstable statistics caused by an excessively small filtered subset.
+            safe_lab = pair_f["LAB"].dropna()
+            filter_note += " Fewer than 3 LINE-in-control pairs were available, so all paired LAB values were used."
+
+        m = safe_lab.mean()
+        s = safe_lab.std()
+        q1 = safe_lab.quantile(0.25)
+        q3 = safe_lab.quantile(0.75)
+        median = safe_lab.median()
+
+        std_lcl = m - sig * s
+        std_ucl = m + sig * s
+        iqr_lcl = q1 - iqr_k * (q3 - q1)
+        iqr_ucl = q3 + iqr_k * (q3 - q1)
+
+        rec_lcl = max(std_lcl, iqr_lcl)
+        rec_ucl = min(std_ucl, iqr_ucl)
+        has_overlap = rec_lcl <= rec_ucl
+
+        r = pair_f["LAB"].corr(pair_f["LINE"]) if len(pair_f) >= 2 else np.nan
+        r2 = r ** 2 if pd.notna(r) else np.nan
+
+        calc_res[f] = {
+            "pair": pair_f,
+            "safe_lab": safe_lab,
+            "m": m,
+            "s": s,
+            "median": median,
+            "sig": sig,
+            "iqr_k": iqr_k,
+            "lab_lcl_sheet": lab_lcl_sheet,
+            "lab_ucl_sheet": lab_ucl_sheet,
+            "line_lcl_sheet": line_lcl_sheet,
+            "line_ucl_sheet": line_ucl_sheet,
+            "std_lcl": std_lcl,
+            "std_ucl": std_ucl,
+            "iqr_lcl": iqr_lcl,
+            "iqr_ucl": iqr_ucl,
+            "rec_lcl": rec_lcl if has_overlap else None,
+            "rec_ucl": rec_ucl if has_overlap else None,
+            "r": r,
+            "r2": r2,
+            "filter_note": filter_note,
+        }
+
+        dE_std_sq += max(abs(std_lcl), abs(std_ucl)) ** 2
+        dE_iqr_sq += max(abs(iqr_lcl), abs(iqr_ucl)) ** 2
+
+        # -----------------------------------------------------
+        # Combined LAB + LINE chart
+        # -----------------------------------------------------
+        col_chart, col_table = st.columns([2.15, 1])
+
+        with col_chart:
+            fig, ax = plt.subplots(figsize=(10.5, 5.0))
+            fig.patch.set_facecolor("white")
+            ax.set_facecolor("white")
+
+            ordered_batches = pair_f["製造批號"].tolist()
+            x = np.arange(len(ordered_batches))
+
+            ax.plot(
+                x, pair_f["LAB"].values,
+                marker="^", linestyle="-", linewidth=2.0, markersize=7,
+                color="#2f6bff", markerfacecolor="white", markeredgewidth=1.8,
+                label="LAB Input"
+            )
+            ax.plot(
+                x, pair_f["LINE"].values,
+                marker="o", linestyle="-", linewidth=2.0, markersize=7,
+                color="#f59e0b", markerfacecolor="white", markeredgewidth=1.8,
+                label="LINE Output"
+            )
+
+            # Current LINE limits show whether the output remains controlled.
+            if line_lcl_sheet is not None and line_ucl_sheet is not None:
+                ax.axhline(line_lcl_sheet, color="#dc2626", linestyle="--", linewidth=1.6, label="Current LINE LCL/UCL")
+                ax.axhline(line_ucl_sheet, color="#dc2626", linestyle="--", linewidth=1.6)
+
+                ooc_mask = (pair_f["LINE"] < line_lcl_sheet) | (pair_f["LINE"] > line_ucl_sheet)
+                if ooc_mask.any():
+                    ax.scatter(
+                        x[ooc_mask.values], pair_f.loc[ooc_mask, "LINE"],
+                        s=85, color="#dc2626", marker="o", zorder=6,
+                        label="LINE OOC"
+                    )
+
+            # Candidate incoming LAB range is the main output of this task.
+            if has_overlap:
+                ax.axhspan(rec_lcl, rec_ucl, color="#dbeafe", alpha=0.45, label="Recommended LAB Zone")
+                ax.axhline(rec_lcl, color="#2563eb", linestyle=":", linewidth=1.8)
+                ax.axhline(rec_ucl, color="#2563eb", linestyle=":", linewidth=1.8)
+
+            if lab_lcl_sheet is not None and lab_ucl_sheet is not None:
+                ax.axhline(lab_lcl_sheet, color="#64748b", linestyle="-.", linewidth=1.3, label="Current LAB LCL/UCL")
+                ax.axhline(lab_ucl_sheet, color="#64748b", linestyle="-.", linewidth=1.3)
+
+            ax.set_xticks(x)
+            ax.set_xticklabels(ordered_batches, rotation=45, ha="right", fontsize=9)
+            ax.set_ylabel(f)
+            ax.set_title(f"{f} — Incoming LAB vs Production LINE", fontsize=14, fontweight="bold", pad=12)
+            ax.grid(axis="y", color="#e5e7eb", linestyle="-", linewidth=0.8)
+            ax.grid(axis="x", visible=False)
+            for spine in ["top", "right"]:
+                ax.spines[spine].set_visible(False)
+            ax.spines["left"].set_color("#cbd5e1")
+            ax.spines["bottom"].set_color("#cbd5e1")
+            ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False, fontsize=9)
+            fig.subplots_adjust(right=0.78, bottom=0.24)
+            st.pyplot(fig)
+            plt.close(fig)
+
+        with col_table:
+            current_lab = (
+                f"{lab_lcl_sheet:.3f} ~ {lab_ucl_sheet:.3f}"
+                if lab_lcl_sheet is not None and lab_ucl_sheet is not None else "Not set"
+            )
+            current_line = (
+                f"{line_lcl_sheet:.3f} ~ {line_ucl_sheet:.3f}"
+                if line_lcl_sheet is not None and line_ucl_sheet is not None else "Not set"
+            )
+            rec_txt = f"{rec_lcl:.3f} ~ {rec_ucl:.3f}" if has_overlap else "No overlap"
+
+            result_table = pd.DataFrame([
+                {"Item": "Current LAB limit", "Range / Value": current_lab},
+                {"Item": "Current LINE limit", "Range / Value": current_line},
+                {"Item": f"Standard LAB ({sig:.1f}σ)", "Range / Value": f"{std_lcl:.3f} ~ {std_ucl:.3f}"},
+                {"Item": f"IQR LAB (k={iqr_k:.1f})", "Range / Value": f"{iqr_lcl:.3f} ~ {iqr_ucl:.3f}"},
+                {"Item": "Recommended LAB", "Range / Value": rec_txt},
+                {"Item": "Paired batches", "Range / Value": str(len(pair_f))},
+                {"Item": "LAB data used", "Range / Value": str(len(safe_lab))},
+                {"Item": "LAB→LINE r", "Range / Value": f"{r:.3f}" if pd.notna(r) else "N/A"},
+                {"Item": "LAB→LINE R²", "Range / Value": f"{r2:.3f}" if pd.notna(r2) else "N/A"},
+            ])
+            st.dataframe(result_table, hide_index=True, use_container_width=True)
+            st.caption(filter_note)
+
+            if pd.notna(r2):
+                if r2 >= 0.60:
+                    st.error(f"🔴 Strong LAB→LINE relationship (R²={r2:.3f})")
+                elif r2 >= 0.30:
+                    st.warning(f"🟠 Moderate LAB→LINE relationship (R²={r2:.3f})")
+                else:
+                    st.success(f"🟢 Weak LAB→LINE relationship (R²={r2:.3f})")
+
+        st.markdown("---")
+
+    # ---------------------------------------------------------
+    # Three-factor incoming LAB control-limit summary
+    # ---------------------------------------------------------
     if len(calc_res) == 3:
-        # =====================================================
-        # TASK 3 SUMMARY: ΔL / Δa / Δb — BOTH CALCULATION METHODS
-        # Recommendation = conservative intersection of Method 1 and Method 2
-        # =====================================================
-        st.markdown("### 📋 Control Limit Summary — ΔL / Δa / Δb")
+        st.markdown("### 📋 Recommended Incoming LAB Control Limits")
 
         summary_rows = []
         recommendation_valid = True
@@ -1132,141 +1299,89 @@ elif app_mode == "🎛️ Control Limit Calculator":
 
         for f in factors:
             res = calc_res[f]
-
-            # Conservative recommendation: keep only the range supported by BOTH methods.
-            rec_lcl = max(res["std_lcl"], res["iqr_lcl"])
-            rec_ucl = min(res["std_ucl"], res["iqr_ucl"])
-            has_overlap = rec_lcl <= rec_ucl
-
-            if has_overlap:
-                res["rec_lcl"] = rec_lcl
-                res["rec_ucl"] = rec_ucl
-                res["rec_status"] = "✅ Overlap"
-                dE_rec_sq += max(abs(rec_lcl), abs(rec_ucl)) ** 2
+            has_rec = res["rec_lcl"] is not None and res["rec_ucl"] is not None
+            if has_rec:
+                dE_rec_sq += max(abs(res["rec_lcl"]), abs(res["rec_ucl"])) ** 2
             else:
-                # Do not fabricate a control limit when the two statistical methods disagree.
-                res["rec_lcl"] = None
-                res["rec_ucl"] = None
-                res["rec_status"] = "⚠ No overlap"
                 recommendation_valid = False
 
             summary_rows.append({
                 "Factor": f,
-                "n": len(res["data"]),
-                "Mean": round(res["m"], 3),
-                "標準差 (σ)": round(res["s"], 3),
-                "Method 1 Kσ": f"{res['sig']:.1f}σ",
+                "Paired n": len(res["pair"]),
+                "LAB n used": len(res["safe_lab"]),
+                "LAB Mean": round(res["m"], 3),
+                "LAB σ": round(res["s"], 3),
                 "Standard LCL": round(res["std_lcl"], 3),
                 "Standard UCL": round(res["std_ucl"], 3),
-                "Method 2 IQR k": f"{res['iqr_k']:.1f}",
                 "IQR LCL": round(res["iqr_lcl"], 3),
                 "IQR UCL": round(res["iqr_ucl"], 3),
-                "Recommended LCL": round(rec_lcl, 3) if has_overlap else None,
-                "Recommended UCL": round(rec_ucl, 3) if has_overlap else None,
-                "Current Sheet LCL": round(res["olcl"], 3) if pd.notnull(res["olcl"]) else None,
-                "Current Sheet UCL": round(res["oucl"], 3) if pd.notnull(res["oucl"]) else None,
-                "Recommendation Status": res["rec_status"],
+                "Recommended LAB LCL": round(res["rec_lcl"], 3) if has_rec else None,
+                "Recommended LAB UCL": round(res["rec_ucl"], 3) if has_rec else None,
+                "LAB→LINE r": round(res["r"], 3) if pd.notna(res["r"]) else None,
+                "LAB→LINE R²": round(res["r2"], 3) if pd.notna(res["r2"]) else None,
             })
 
-        control_limit_summary = pd.DataFrame(summary_rows)
-        st.dataframe(control_limit_summary, hide_index=True, use_container_width=True)
+        incoming_summary = pd.DataFrame(summary_rows)
+        st.dataframe(incoming_summary, hide_index=True, use_container_width=True)
         st.caption(
-            "Method 1 = Mean ± Kσ. Method 2 = Q1 − k×IQR to Q3 + k×IQR. "
-            "Recommended limits = intersection of Method 1 and Method 2: "
-            "LCL = max(Standard LCL, IQR LCL), UCL = min(Standard UCL, IQR UCL)."
+            "Recommended LAB limits are the intersection of Mean ± Kσ and IQR limits calculated from "
+            "incoming LAB values associated with acceptable LINE outputs whenever current LINE limits are available."
         )
-        st.markdown("---")
 
         dE_std = math.sqrt(dE_std_sq)
         dE_iqr = math.sqrt(dE_iqr_sq)
         dE_rec = math.sqrt(dE_rec_sq) if recommendation_valid else None
-        limit_threshold = 1.0 if calc_source.upper() == "LINE" else 0.5
 
-        st.markdown("### 🎯 Derived ΔE UCL Comparison")
-        col_res1, col_res2, col_res3 = st.columns(3)
+        # Existing project target for incoming LAB color difference.
+        lab_de_target = 0.5
 
-        with col_res1:
-            if dE_std <= limit_threshold:
-                st.success(f"**Method 1 (Standard)** ΔE UCL: **{dE_std:.3f}** (✅ ≤ {limit_threshold})")
-            else:
-                st.error(f"**Method 1 (Standard)** ΔE UCL: **{dE_std:.3f}** (⚠️ > {limit_threshold})")
+        st.markdown("### 🎯 Incoming LAB ΔE Boundary Check")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Standard-derived ΔE", f"{dE_std:.3f}")
+        c2.metric("IQR-derived ΔE", f"{dE_iqr:.3f}")
+        c3.metric("Recommended ΔE", f"{dE_rec:.3f}" if dE_rec is not None else "N/A")
 
-        with col_res2:
-            if dE_iqr <= limit_threshold:
-                st.success(f"**Method 2 (IQR)** ΔE UCL: **{dE_iqr:.3f}** (✅ ≤ {limit_threshold})")
-            else:
-                st.error(f"**Method 2 (IQR)** ΔE UCL: **{dE_iqr:.3f}** (⚠️ > {limit_threshold})")
-
-        with col_res3:
-            if dE_rec is None:
-                st.warning("**Recommended** ΔE UCL: **N/A**\n\n⚠ One or more factors have no overlap")
-            elif dE_rec <= limit_threshold:
-                st.success(f"**Recommended** ΔE UCL: **{dE_rec:.3f}** (✅ ≤ {limit_threshold})")
-            else:
-                st.error(f"**Recommended** ΔE UCL: **{dE_rec:.3f}** (⚠️ > {limit_threshold})")
-
-        st.markdown("---")
-        st.markdown("### 💡 AI Control Limit Recommendation")
-        st.info(
-            "Recommendation is based directly on the overlap of **Method 1 (Standard)** and "
-            "**Method 2 (IQR)**. The system does **not** expand ΔL / Δa / Δb limits to consume the available ΔE tolerance."
-        )
-
-        col_rl, col_ra, col_rb = st.columns(3)
-        rec_cols = {"ΔL": col_rl, "Δa": col_ra, "Δb": col_rb}
-
-        for f in factors:
-            res = calc_res[f]
-            col = rec_cols[f]
-
-            if res["rec_lcl"] is not None and res["rec_ucl"] is not None:
-                rec_center = (res["rec_lcl"] + res["rec_ucl"]) / 2
-                rec_width = res["rec_ucl"] - res["rec_lcl"]
-                col.success(
-                    f"**{f} Recommended Control Limit**\n\n"
-                    f"### {res['rec_lcl']:.3f} ~ {res['rec_ucl']:.3f}\n\n"
-                    f"Mean: **{res['m']:.3f}**  |  σ: **{res['s']:.3f}**  |  Center: **{rec_center:.3f}**  |  Width: **{rec_width:.3f}**"
-                )
-            else:
-                col.warning(
-                    f"**{f} Recommended Control Limit**\n\n"
-                    "### Manual Review Required\n\n"
-                    "Standard and IQR ranges do not overlap."
-                )
-
-        if recommendation_valid:
-            if dE_rec <= limit_threshold:
-                st.success(
-                    f"✅ **Recommendation validated:** Using the recommended ΔL / Δa / Δb boundaries, "
-                    f"the derived worst-case ΔE UCL is **{dE_rec:.3f}**, within the {calc_source} threshold **≤ {limit_threshold}**."
-                )
-            else:
-                st.warning(
-                    f"⚠️ **Recommendation requires further tightening:** The overlap-based limits yield "
-                    f"a derived worst-case ΔE UCL of **{dE_rec:.3f}**, above the {calc_source} threshold **{limit_threshold}**. "
-                    "The system will not widen the component limits; review process variation or tighten the limits manually."
-                )
+        if dE_rec is None:
+            st.warning("At least one factor has no overlap between Standard and IQR; review that factor before setting the incoming LAB limit.")
+        elif dE_rec <= lab_de_target:
+            st.success(
+                f"✅ Recommended incoming LAB component limits produce a derived ΔE boundary of {dE_rec:.3f}, "
+                f"within the current LAB target ≤ {lab_de_target}."
+            )
         else:
             st.warning(
-                "⚠️ A final three-factor recommendation cannot be issued because at least one factor has no common range "
-                "between Standard and IQR. Review that factor before setting a new control limit."
+                f"⚠ Recommended incoming LAB component limits produce a derived ΔE boundary of {dE_rec:.3f}, "
+                f"above the current LAB target {lab_de_target}. Further tightening should be reviewed."
             )
 
+        st.markdown("### 💡 How to use this result")
+        st.info(
+            "Use the **Recommended LAB LCL/UCL** as the incoming paint control window. "
+            "Continue monitoring the paired LINE output trend. If LINE OOC events remain concentrated at particular LAB zones, "
+            "the incoming LAB window should be tightened or shifted using the paired historical relationship rather than treating LAB and LINE separately."
+        )
+
+    # ---------------------------------------------------------
+    # Manual LAB ΔE calculator
+    # ---------------------------------------------------------
     st.markdown("---")
-    st.subheader("🧮 Manual ΔE Calculator")
+    st.subheader("🧮 Manual Incoming LAB ΔE Calculator")
     col_ml, col_ma, col_mb = st.columns(3)
-    with col_ml: man_L = st.number_input("Input ΔL value:", value=0.000, step=0.100, format="%.3f")
-    with col_ma: man_a = st.number_input("Input Δa value:", value=0.000, step=0.100, format="%.3f")
-    with col_mb: man_b = st.number_input("Input Δb value:", value=0.000, step=0.100, format="%.3f")
-        
-    manual_dE = math.sqrt(man_L**2 + man_a**2 + man_b**2)
-    limit_threshold = 1.0 if calc_source.upper() == "LINE" else 0.5
-    
-    st.markdown("#### **Calculation Result**")
-    if manual_dE <= limit_threshold:
-        st.success(f"### 🎯 Calculated ΔE: **{manual_dE:.3f}** (✅ Meets **{calc_source}** standard ≤ {limit_threshold})")
+    with col_ml:
+        man_L = st.number_input("Incoming LAB ΔL:", value=0.000, step=0.100, format="%.3f")
+    with col_ma:
+        man_a = st.number_input("Incoming LAB Δa:", value=0.000, step=0.100, format="%.3f")
+    with col_mb:
+        man_b = st.number_input("Incoming LAB Δb:", value=0.000, step=0.100, format="%.3f")
+
+    manual_dE = math.sqrt(man_L ** 2 + man_a ** 2 + man_b ** 2)
+    lab_de_target = 0.5
+
+    st.markdown("#### Calculation Result")
+    if manual_dE <= lab_de_target:
+        st.success(f"### 🎯 Incoming LAB ΔE: **{manual_dE:.3f}** (✅ ≤ {lab_de_target})")
     else:
-        st.error(f"### 🎯 Calculated ΔE: **{manual_dE:.3f}** (⚠️ Exceeds **{calc_source}** limit > {limit_threshold})")
+        st.error(f"### 🎯 Incoming LAB ΔE: **{manual_dE:.3f}** (⚠️ > {lab_de_target})")
 
 # =========================================================
 # VIEW 4: LAB VS LINE SCALE-UP ANALYSIS
