@@ -1138,12 +1138,14 @@ elif app_mode == "🎛️ Control Limit Calculator":
     factors = ["ΔL", "Δa", "Δb"]
 
     # ---------------------------------------------------------
-    # Task 3 summary table: LAB input / LINE output statistics
+    # Task 3 summary table: LAB INPUT statistics only
     # Control limits shown here use fixed x̄ ± 1.5σ, matching the report format.
+    # LINE output remains available in the paired analysis and LINE-limit section below,
+    # but is intentionally excluded from this summary table.
     # ---------------------------------------------------------
-    st.markdown("### 📋 LAB / LINE 色差統計與 ±1.5σ 管制界限")
+    st.markdown("### 📋 LAB 入料色差統計與 ±1.5σ 管制界限")
     st.caption(
-        "以各製造批號之平均值計算 Min、Max、平均值 (x̄)、標準差 (σ)，"
+        "僅針對 LAB 入料資料，以各製造批號之平均值計算 Min、Max、平均值 (x̄)、標準差 (σ)，"
         "並以 x̄ ± 1.5σ 計算 LCL / UCL。"
     )
 
@@ -1151,32 +1153,31 @@ elif app_mode == "🎛️ Control Limit Calculator":
     task3_stats_rows = []
 
     for _f in factors:
-        for _source_key, _source_zh in [("lab", "入料"), ("line", "產出")]:
-            _vals = pd.to_numeric(
-                spc_data[_f][_source_key]["value"], errors="coerce"
-            ).dropna()
+        _vals = pd.to_numeric(
+            spc_data[_f]["lab"]["value"], errors="coerce"
+        ).dropna()
 
-            if len(_vals) > 0:
-                _min = _vals.min()
-                _max = _vals.max()
-                _mean = _vals.mean()
-                _std = _vals.std()
-                if pd.isna(_std):
-                    _std = 0.0
-                _lcl = _mean - summary_sigma_k * _std
-                _ucl = _mean + summary_sigma_k * _std
-            else:
-                _min = _max = _mean = _std = _lcl = _ucl = np.nan
+        if len(_vals) > 0:
+            _min = _vals.min()
+            _max = _vals.max()
+            _mean = _vals.mean()
+            _std = _vals.std()
+            if pd.isna(_std):
+                _std = 0.0
+            _lcl = _mean - summary_sigma_k * _std
+            _ucl = _mean + summary_sigma_k * _std
+        else:
+            _min = _max = _mean = _std = _lcl = _ucl = np.nan
 
-            task3_stats_rows.append({
-                "入料 / 產出色差走向": f"{delta_label(_f)}{_source_zh}",
-                "Min": _min,
-                "Max": _max,
-                "平均值 (x̄)": _mean,
-                "標準差 (σ)": _std,
-                "LCL (-1.5σ)": _lcl,
-                "UCL (+1.5σ)": _ucl,
-            })
+        task3_stats_rows.append({
+            "入料色差走向": f"{delta_label(_f)}入料",
+            "Min": _min,
+            "Max": _max,
+            "平均值 (x̄)": _mean,
+            "標準差 (σ)": _std,
+            "LCL (-1.5σ)": _lcl,
+            "UCL (+1.5σ)": _ucl,
+        })
 
     task3_stats_df = pd.DataFrame(task3_stats_rows)
     st.dataframe(
@@ -1197,8 +1198,8 @@ elif app_mode == "🎛️ Control Limit Calculator":
 
     _xlsx_buf = io.BytesIO()
     with pd.ExcelWriter(_xlsx_buf, engine="openpyxl") as writer:
-        task3_stats_df.to_excel(writer, index=False, sheet_name="LAB_LINE_Stats")
-        ws = writer.book["LAB_LINE_Stats"]
+        task3_stats_df.to_excel(writer, index=False, sheet_name="LAB_Input_Stats")
+        ws = writer.book["LAB_Input_Stats"]
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = ws.dimensions
         for col_cells in ws.columns:
@@ -1217,7 +1218,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
         st.download_button(
             label="📥 Download Table (Excel)",
             data=_xlsx_buf,
-            file_name=f"{_safe_color_name}_LAB_LINE_Stats_1.5Sigma.xlsx",
+            file_name=f"{_safe_color_name}_LAB_Input_Stats_1.5Sigma.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key=f"task3_stats_xlsx_{_safe_color_name}",
             use_container_width=True,
@@ -1226,7 +1227,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
         st.download_button(
             label="📥 Download Table (CSV)",
             data=_csv_buf,
-            file_name=f"{_safe_color_name}_LAB_LINE_Stats_1.5Sigma.csv",
+            file_name=f"{_safe_color_name}_LAB_Input_Stats_1.5Sigma.csv",
             mime="text/csv",
             key=f"task3_stats_csv_{_safe_color_name}",
             use_container_width=True,
@@ -1666,15 +1667,15 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 "LINE control limits are available."
             )
 
-            doc.add_heading("2. LAB / LINE Statistical Summary (±1.5σ)", level=1)
+            doc.add_heading("2. LAB Input Statistical Summary (±1.5σ)", level=1)
             doc.add_paragraph(
-                "Min, Max, mean (x̄), standard deviation (σ), and control limits are calculated at batch level. "
-                "LCL/UCL in this table are defined as x̄ ± 1.5σ."
+                "This table summarizes LAB input data only. Min, Max, mean (x̄), standard deviation (σ), "
+                "and control limits are calculated at batch level. LCL/UCL are defined as x̄ ± 1.5σ."
             )
             stats_table = doc.add_table(rows=1, cols=7)
             stats_table.style = "Table Grid"
             stats_headers = [
-                "入料 / 產出色差走向", "Min", "Max", "平均值 (x̄)", "標準差 (σ)",
+                "入料色差走向", "Min", "Max", "平均值 (x̄)", "標準差 (σ)",
                 "LCL (-1.5σ)", "UCL (+1.5σ)"
             ]
             for _i, _h in enumerate(stats_headers):
@@ -1682,7 +1683,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
 
             for _, _r in task3_stats_df.iterrows():
                 _cells = stats_table.add_row().cells
-                _cells[0].text = str(_r["入料 / 產出色差走向"])
+                _cells[0].text = str(_r["入料色差走向"])
                 for _j, _col in enumerate(stats_headers[1:], start=1):
                     _val = _r[_col]
                     _cells[_j].text = f"{float(_val):.3f}" if pd.notna(_val) else "-"
