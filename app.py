@@ -1363,8 +1363,50 @@ elif app_mode == "🎛️ Control Limit Calculator":
 
         std_lcl = m - sig * s
         std_ucl = m + sig * s
-        iqr_lcl = q1 - iqr_k * (q3 - q1)
-        iqr_ucl = q3 + iqr_k * (q3 - q1)
+        iqr_value = q3 - q1
+        iqr_lcl = q1 - iqr_k * iqr_value
+        iqr_ucl = q3 + iqr_k * iqr_value
+
+        # -----------------------------------------------------
+        # IQR manual calculation table (step-by-step)
+        # -----------------------------------------------------
+        st.markdown(f"### 🧮 IQR 手算步驟 — {delta_label(f)} 入料")
+        st.caption(
+            "依標準 IQR 公式計算：IQR = Q3 − Q1；LL = Q1 − k×IQR；UL = Q3 + k×IQR。"
+        )
+
+        _iqr_manual_df = pd.DataFrame([
+            {
+                "計算項目": "Q1 (25%)",
+                f"{delta_label(f)} 入料": f"{q1:.3f}"
+            },
+            {
+                "計算項目": "Q3 (75%)",
+                f"{delta_label(f)} 入料": f"{q3:.3f}"
+            },
+            {
+                "計算項目": "IQR (Q3 − Q1)",
+                f"{delta_label(f)} 入料": f"{q3:.3f} − {q1:.3f} = {iqr_value:.3f}"
+            },
+            {
+                "計算項目": f"控制範圍 LL (Q1 − {iqr_k:.2f}×IQR)",
+                f"{delta_label(f)} 入料": f"{q1:.3f} − ({iqr_k:.2f} × {iqr_value:.3f}) = {iqr_lcl:.3f}"
+            },
+            {
+                "計算項目": f"控制範圍 UL (Q3 + {iqr_k:.2f}×IQR)",
+                f"{delta_label(f)} 入料": f"{q3:.3f} + ({iqr_k:.2f} × {iqr_value:.3f}) = {iqr_ucl:.3f}"
+            },
+        ])
+
+        st.dataframe(
+            _iqr_manual_df,
+            hide_index=True,
+            use_container_width=True,
+        )
+
+        st.info(
+            f"IQR結果：{delta_label(f)} 入料 LL = {iqr_lcl:.3f}，UL = {iqr_ucl:.3f} （k = {iqr_k:.2f}）"
+        )
 
         rec_lcl = max(std_lcl, iqr_lcl)
         rec_ucl = min(std_ucl, iqr_ucl)
