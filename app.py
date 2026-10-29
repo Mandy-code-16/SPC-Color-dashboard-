@@ -189,119 +189,6 @@ DELTA_DISPLAY = {"ΔL": "ΔL*", "Δa": "Δa*", "Δb": "Δb*", "ΔE": "ΔE*"}
 def delta_label(value):
     return DELTA_DISPLAY.get(value, value)
 
-def create_task3_trend_figure(
-    pair_df, factor, color_code,
-    line_lcl_sheet, line_ucl_sheet,
-    lab_lcl_sheet, lab_ucl_sheet,
-    has_overlap, rec_lcl, rec_ucl,
-    mode="display"
-):
-    """Create a Task 3 trend chart optimized either for app display or Word export."""
-    if mode == "report":
-        fig_w, fig_h = 4.9, 2.9
-        title_fs = 11.5
-        label_fs = 9.5
-        tick_fs = 8.8
-        legend_fs = 8.8
-        marker_size = 4.8
-        line_w = 1.5
-        show_batch_labels = False
-        bottom_margin = 0.29
-        legend_y = 0.02
-    else:
-        fig_w, fig_h = 11.0, 5.6
-        title_fs = 15
-        label_fs = 11
-        tick_fs = 10
-        legend_fs = 10
-        marker_size = 6.2
-        line_w = 1.8
-        show_batch_labels = True
-        bottom_margin = 0.34
-        legend_y = 0.02
-
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
-    fig.patch.set_facecolor("white")
-    fig.patch.set_edgecolor("#8a8a8a")
-    fig.patch.set_linewidth(1.2)
-    ax.set_facecolor("white")
-
-    ordered_batches = pair_df["製造批號"].astype(str).tolist()
-    x = np.arange(len(ordered_batches))
-
-    ax.plot(
-        x, pair_df["LINE"].values,
-        marker="D", linestyle="-", linewidth=line_w, markersize=marker_size,
-        color="#ed7d31", markerfacecolor="#ed7d31", markeredgewidth=0,
-        label=f"{delta_label(factor)}產出"
-    )
-    ax.plot(
-        x, pair_df["LAB"].values,
-        marker="s", linestyle="-", linewidth=line_w, markersize=marker_size,
-        color="#5b9bd5", markerfacecolor="#5b9bd5", markeredgewidth=0,
-        label=f"{delta_label(factor)}入料"
-    )
-
-    if line_lcl_sheet is not None and line_ucl_sheet is not None:
-        ax.axhline(line_lcl_sheet, color="#dc2626", linestyle="--", linewidth=1.0, label="LINE LCL/UCL")
-        ax.axhline(line_ucl_sheet, color="#dc2626", linestyle="--", linewidth=1.0)
-        ooc_mask = (pair_df["LINE"] < line_lcl_sheet) | (pair_df["LINE"] > line_ucl_sheet)
-        if ooc_mask.any():
-            ax.scatter(
-                x[ooc_mask.values], pair_df.loc[ooc_mask, "LINE"],
-                s=65 if mode == "display" else 48, color="#dc2626", marker="o", zorder=6,
-                label="LINE OOC"
-            )
-
-    if has_overlap:
-        ax.axhspan(rec_lcl, rec_ucl, color="#dbeafe", alpha=0.35, label="Recommended LAB")
-        ax.axhline(rec_lcl, color="#2563eb", linestyle=":", linewidth=1.2)
-        ax.axhline(rec_ucl, color="#2563eb", linestyle=":", linewidth=1.2)
-
-    if lab_lcl_sheet is not None and lab_ucl_sheet is not None:
-        ax.axhline(lab_lcl_sheet, color="#7f7f7f", linestyle="-.", linewidth=1.0, label="LAB LCL/UCL")
-        ax.axhline(lab_ucl_sheet, color="#7f7f7f", linestyle="-.", linewidth=1.0)
-
-    ax.set_xticks(x)
-    if show_batch_labels:
-        batch_labels = ordered_batches
-        ax.set_xticklabels(batch_labels, rotation=35, ha="right", fontsize=tick_fs)
-        x_label = "Batch No."
-    else:
-        seq_labels = [str(i + 1) for i in range(len(ordered_batches))]
-        ax.set_xticklabels(seq_labels, rotation=0, ha="center", fontsize=tick_fs)
-        x_label = "Batch sequence"
-
-    ax.set_ylabel(delta_label(factor), fontsize=label_fs, fontweight="bold")
-    ax.set_xlabel(x_label, fontsize=label_fs, labelpad=8, fontweight="bold")
-    ax.set_title(f"{delta_label(factor)} 入料及產出趨勢比較", fontsize=title_fs, fontweight="bold", pad=10)
-    ax.grid(axis="y", color="#bfbfbf", linestyle="-", linewidth=0.8)
-    ax.grid(axis="x", visible=False)
-
-    for spine in ["top", "right", "left", "bottom"]:
-        ax.spines[spine].set_visible(True)
-        ax.spines[spine].set_color("#7f7f7f")
-        ax.spines[spine].set_linewidth(0.9)
-
-    ax.tick_params(axis='both', colors='black', labelsize=tick_fs)
-
-    handles, labels = ax.get_legend_handles_labels()
-    uniq_handles, uniq_labels = [], []
-    for h, lab in zip(handles, labels):
-        if lab not in uniq_labels:
-            uniq_handles.append(h)
-            uniq_labels.append(lab)
-
-    fig.legend(
-        uniq_handles, uniq_labels,
-        loc="lower center", bbox_to_anchor=(0.5, legend_y),
-        ncol=min(2 if mode == "report" else 3, len(uniq_labels)), frameon=False, fontsize=legend_fs,
-        handlelength=1.8, columnspacing=1.2, handletextpad=0.5
-    )
-
-    fig.subplots_adjust(bottom=bottom_margin, top=0.85, left=0.12, right=0.97)
-    return fig
-
 # =========================
 # HELPER FUNCTIONS
 # =========================
@@ -1405,8 +1292,54 @@ elif app_mode == "🎛️ Control Limit Calculator":
     st.markdown("---")
 
     calc_res = {}
-    chart_buffers = {}  # Store Task 3 chart PNG bytes for download + Word report
-    report_chart_buffers = {}  # Higher readability layout for the Word-report montage page
+    chart_buffers = {}  # Existing full-size charts used by the app/download
+    report_chart_buffers = {}  # Dedicated high-resolution charts for the one-page Word layout
+
+    def build_task3_report_chart(pair_df, factor):
+        """Clean, high-resolution trend chart for the Word report.
+        Important: keep all Matplotlib text in the original English/CIELAB notation
+        so Streamlit Cloud does not depend on a Chinese CJK font package.
+        """
+        fig_r, ax_r = plt.subplots(figsize=(6.2, 3.45))
+        fig_r.patch.set_facecolor("white")
+        ax_r.set_facecolor("white")
+
+        x_r = np.arange(len(pair_df))
+        ax_r.plot(
+            x_r, pair_df["LINE"].values,
+            marker="D", linestyle="-", linewidth=2.0, markersize=6.0,
+            color="#ed7d31", label="LINE Output"
+        )
+        ax_r.plot(
+            x_r, pair_df["LAB"].values,
+            marker="s", linestyle="-", linewidth=2.0, markersize=6.0,
+            color="#5b9bd5", label="LAB Input"
+        )
+
+        ax_r.set_xticks(x_r)
+        ax_r.set_xticklabels([str(i + 1) for i in x_r], fontsize=10)
+        ax_r.set_xlabel("Batch sequence", fontsize=11, fontweight="bold", labelpad=7)
+        ax_r.set_ylabel(delta_label(factor), fontsize=11, fontweight="bold")
+        ax_r.set_title(
+            f"{delta_label(factor)} LAB Input vs LINE Output",
+            fontsize=13, fontweight="bold", pad=9
+        )
+        ax_r.tick_params(axis="y", labelsize=10)
+        ax_r.grid(axis="y", color="#c9c9c9", linestyle="-", linewidth=0.8)
+        ax_r.grid(axis="x", visible=False)
+
+        for spine in ["top", "right", "left", "bottom"]:
+            ax_r.spines[spine].set_visible(True)
+            ax_r.spines[spine].set_color("#8a8a8a")
+            ax_r.spines[spine].set_linewidth(0.9)
+
+        ax_r.legend(
+            loc="upper center", bbox_to_anchor=(0.5, -0.20),
+            ncol=2, frameon=False, fontsize=10,
+            handlelength=2.0, columnspacing=1.8
+        )
+        fig_r.subplots_adjust(left=0.13, right=0.97, top=0.84, bottom=0.31)
+        return fig_r
     dE_std_sq = 0.0
     dE_iqr_sq = 0.0
 
@@ -1563,32 +1496,107 @@ elif app_mode == "🎛️ Control Limit Calculator":
         col_chart, col_table = st.columns([2.15, 1])
 
         with col_chart:
-            fig = create_task3_trend_figure(
-                pair_f, f, color,
-                line_lcl_sheet, line_ucl_sheet,
-                lab_lcl_sheet, lab_ucl_sheet,
-                has_overlap, rec_lcl, rec_ucl,
-                mode="display"
+            fig, ax = plt.subplots(figsize=(10.5, 5.0))
+
+            # Excel-like framed chart area
+            fig.patch.set_facecolor("white")
+            fig.patch.set_edgecolor("#8a8a8a")
+            fig.patch.set_linewidth(1.2)
+            ax.set_facecolor("white")
+
+            ordered_batches = pair_f["製造批號"].tolist()
+            x = np.arange(len(ordered_batches))
+
+            ax.plot(
+                x, pair_f["LINE"].values,
+                marker="D", linestyle="-", linewidth=1.6, markersize=5.5,
+                color="#ed7d31", markerfacecolor="#ed7d31", markeredgewidth=0,
+                label="LINE Output"
             )
+            ax.plot(
+                x, pair_f["LAB"].values,
+                marker="s", linestyle="-", linewidth=1.6, markersize=5.5,
+                color="#5b9bd5", markerfacecolor="#5b9bd5", markeredgewidth=0,
+                label="LAB Input"
+            )
+
+            # Current LINE limits show whether the output remains controlled.
+            if line_lcl_sheet is not None and line_ucl_sheet is not None:
+                ax.axhline(line_lcl_sheet, color="#dc2626", linestyle="--", linewidth=1.2, label="LINE LCL/UCL")
+                ax.axhline(line_ucl_sheet, color="#dc2626", linestyle="--", linewidth=1.2)
+
+                ooc_mask = (pair_f["LINE"] < line_lcl_sheet) | (pair_f["LINE"] > line_ucl_sheet)
+                if ooc_mask.any():
+                    ax.scatter(
+                        x[ooc_mask.values], pair_f.loc[ooc_mask, "LINE"],
+                        s=75, color="#dc2626", marker="o", zorder=6,
+                        label="LINE OOC"
+                    )
+
+            # Candidate incoming LAB range is the main output of this task.
+            if has_overlap:
+                ax.axhspan(rec_lcl, rec_ucl, color="#dbeafe", alpha=0.35, label="Recommended LAB")
+                ax.axhline(rec_lcl, color="#2563eb", linestyle=":", linewidth=1.4)
+                ax.axhline(rec_ucl, color="#2563eb", linestyle=":", linewidth=1.4)
+
+            if lab_lcl_sheet is not None and lab_ucl_sheet is not None:
+                ax.axhline(lab_lcl_sheet, color="#7f7f7f", linestyle="-.", linewidth=1.0, label="LAB LCL/UCL")
+                ax.axhline(lab_ucl_sheet, color="#7f7f7f", linestyle="-.", linewidth=1.0)
+
+            ax.set_xticks(x)
+            ax.set_xticklabels(ordered_batches, rotation=35, ha="right", fontsize=9)
+            ax.set_ylabel(delta_label(f))
+            ax.set_xlabel("Batch No.", fontsize=10, labelpad=10)
+            ax.set_title(f"Analysis: {delta_label(f)} (LAB vs LINE)", fontsize=14, fontweight="bold", pad=12)
+            ax.grid(axis="y", color="#bfbfbf", linestyle="-", linewidth=0.8)
+            ax.grid(axis="x", visible=False)
+
+            # Full border around plot area like the user's example
+            for spine in ["top", "right", "left", "bottom"]:
+                ax.spines[spine].set_visible(True)
+                ax.spines[spine].set_color("#7f7f7f")
+                ax.spines[spine].set_linewidth(0.9)
+
+            ax.tick_params(axis='both', colors='black', labelsize=9)
+
+            # Deduplicate legend labels and place the legend just below the chart
+            handles, labels = ax.get_legend_handles_labels()
+            uniq_handles, uniq_labels = [], []
+            for h, lab in zip(handles, labels):
+                if lab not in uniq_labels:
+                    uniq_handles.append(h)
+                    uniq_labels.append(lab)
+            # Put legend on its own row at the very bottom of the figure.
+            # This prevents overlap with rotated Batch No. tick labels and X-axis title.
+            fig.legend(
+                uniq_handles, uniq_labels,
+                loc="lower center", bbox_to_anchor=(0.5, 0.015),
+                ncol=min(3, len(uniq_labels)), frameon=False, fontsize=9,
+                handlelength=2.0, columnspacing=1.6, handletextpad=0.5
+            )
+
+            # Reserve three clearly separated vertical zones:
+            # plot -> Batch No. labels/X title -> legend
+            fig.subplots_adjust(bottom=0.36, right=0.96)
             st.pyplot(fig)
 
+            # Save exactly the displayed chart for PNG download and Word export.
             chart_png = io.BytesIO()
             fig.savefig(chart_png, format="png", dpi=320, bbox_inches="tight", facecolor="white")
             chart_png.seek(0)
             chart_bytes = chart_png.getvalue()
             chart_buffers[f] = chart_bytes
 
-            report_fig = create_task3_trend_figure(
-                pair_f, f, color,
-                line_lcl_sheet, line_ucl_sheet,
-                lab_lcl_sheet, lab_ucl_sheet,
-                has_overlap, rec_lcl, rec_ucl,
-                mode="report"
-            )
+            # Separate Word-report chart: larger text + 500 DPI + no CJK text in Matplotlib.
+            report_fig = build_task3_report_chart(pair_f, f)
             report_png = io.BytesIO()
-            report_fig.savefig(report_png, format="png", dpi=360, bbox_inches="tight", facecolor="white")
+            report_fig.savefig(
+                report_png, format="png", dpi=500,
+                bbox_inches="tight", facecolor="white", pad_inches=0.04
+            )
             report_png.seek(0)
             report_chart_buffers[f] = report_png.getvalue()
+            plt.close(report_fig)
 
             factor_filename = {"ΔL": "DeltaL", "Δa": "Deltaa", "Δb": "Deltab"}.get(f, str(f))
             st.download_button(
@@ -1599,7 +1607,6 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 key=f"task3_png_{color}_{factor_filename}"
             )
             plt.close(fig)
-            plt.close(report_fig)
 
         with col_table:
             current_lab = (
@@ -1724,20 +1731,20 @@ elif app_mode == "🎛️ Control Limit Calculator":
         def build_task3_word_report():
             doc = docx.Document()
 
-            # A4 page setup
+            # A4 portrait for the normal report pages
             section = doc.sections[0]
             section.orientation = WD_ORIENT.PORTRAIT
             section.page_width = Mm(210)
             section.page_height = Mm(297)
             section.top_margin = Inches(0.55)
             section.bottom_margin = Inches(0.55)
-            section.left_margin = Inches(0.55)
-            section.right_margin = Inches(0.55)
+            section.left_margin = Inches(0.60)
+            section.right_margin = Inches(0.60)
 
-            # Base font
+            # Base font in Word only. This does not change Matplotlib chart fonts.
             normal_style = doc.styles["Normal"]
             normal_style.font.name = "Arial"
-            normal_style.font.size = Pt(10.5)
+            normal_style.font.size = Pt(10)
 
             title = doc.add_heading("Incoming LAB Control Limit Analysis Report", level=0)
             title.alignment = 1
@@ -1849,12 +1856,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
 
                 doc.add_paragraph(res['filter_note'])
 
-                if factor in chart_buffers:
-                    p_img = doc.add_paragraph()
-                    p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    p_img.add_run().add_picture(io.BytesIO(chart_buffers[factor]), width=Inches(6.45))
-                    cap = doc.add_paragraph(f"Figure {factors.index(factor)+1}: {delta_label(factor)} LAB Input vs LINE Output")
-                    cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                # Charts are placed together on one dedicated A4 landscape page below.
 
             if len(calc_res) == 3:
                 doc.add_heading("5. Recommended Incoming LAB Control Limit Summary", level=1)
@@ -1883,49 +1885,63 @@ elif app_mode == "🎛️ Control Limit Calculator":
                     for i, value in enumerate(vals):
                         row[i].text = value
 
+                # One-page high-resolution chart overview, arranged like the user's reference:
+                # ΔL* top-left, Δa* top-right, Δb* centered below.
                 if all(f in report_chart_buffers for f in factors):
                     chart_section = doc.add_section(WD_SECTION.NEW_PAGE)
                     chart_section.orientation = WD_ORIENT.LANDSCAPE
                     chart_section.page_width = Mm(297)
                     chart_section.page_height = Mm(210)
-                    chart_section.top_margin = Inches(0.35)
-                    chart_section.bottom_margin = Inches(0.35)
-                    chart_section.left_margin = Inches(0.35)
-                    chart_section.right_margin = Inches(0.35)
+                    chart_section.top_margin = Inches(0.28)
+                    chart_section.bottom_margin = Inches(0.28)
+                    chart_section.left_margin = Inches(0.30)
+                    chart_section.right_margin = Inches(0.30)
 
-                    chart_title = doc.add_paragraph()
-                    chart_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    chart_run = chart_title.add_run(f"圖 2 {delta_label('ΔL')}、{delta_label('Δa')} 與 {delta_label('Δb')}入料及產出趨勢比較（{color}）")
-                    chart_run.bold = True
-                    chart_run.font.size = Pt(13)
+                    p_title = doc.add_paragraph()
+                    p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    r_title = p_title.add_run(
+                        f"Figure 2  ΔL*, Δa* and Δb* LAB Input vs LINE Output Trend ({color})"
+                    )
+                    r_title.bold = True
+                    r_title.font.size = Pt(13)
 
-                    layout_table = doc.add_table(rows=2, cols=2)
-                    layout_table.autofit = False
-                    for row in layout_table.rows:
-                        for cell in row.cells:
-                            for p in cell.paragraphs:
-                                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    chart_table = doc.add_table(rows=2, cols=2)
+                    chart_table.autofit = False
+                    tl = chart_table.cell(0, 0)
+                    tr = chart_table.cell(0, 1)
+                    bot = chart_table.cell(1, 0).merge(chart_table.cell(1, 1))
 
-                    top_left = layout_table.cell(0, 0)
-                    top_right = layout_table.cell(0, 1)
-                    bottom = layout_table.cell(1, 0).merge(layout_table.cell(1, 1))
+                    for cell in [tl, tr, bot]:
+                        cell.vertical_alignment = 1
+                        cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-                    top_left.paragraphs[0].add_run().add_picture(io.BytesIO(report_chart_buffers['ΔL']), width=Inches(4.95))
-                    top_right.paragraphs[0].add_run().add_picture(io.BytesIO(report_chart_buffers['Δa']), width=Inches(4.95))
-                    bottom.paragraphs[0].add_run().add_picture(io.BytesIO(report_chart_buffers['Δb']), width=Inches(5.75))
+                    tl.paragraphs[0].add_run().add_picture(
+                        io.BytesIO(report_chart_buffers["ΔL"]), width=Inches(4.85)
+                    )
+                    tr.paragraphs[0].add_run().add_picture(
+                        io.BytesIO(report_chart_buffers["Δa"]), width=Inches(4.85)
+                    )
+                    bot.paragraphs[0].add_run().add_picture(
+                        io.BytesIO(report_chart_buffers["Δb"]), width=Inches(5.45)
+                    )
 
-                    note = doc.add_paragraph("註：X 軸為批次排序（依時間先後）；藍線為入料，橘線為產出。")
+                    note = doc.add_paragraph(
+                        "Note: X-axis shows batch sequence in chronological order. "
+                        "The blue line is LAB Input and the orange line is LINE Output."
+                    )
                     note.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    for run in note.runs:
+                        run.font.size = Pt(9)
 
-                    # Return to portrait layout for the remaining sections
-                    next_section = doc.add_section(WD_SECTION.NEW_PAGE)
-                    next_section.orientation = WD_ORIENT.PORTRAIT
-                    next_section.page_width = Mm(210)
-                    next_section.page_height = Mm(297)
-                    next_section.top_margin = Inches(0.55)
-                    next_section.bottom_margin = Inches(0.55)
-                    next_section.left_margin = Inches(0.55)
-                    next_section.right_margin = Inches(0.55)
+                    # Continue the remaining report on A4 portrait pages.
+                    portrait_section = doc.add_section(WD_SECTION.NEW_PAGE)
+                    portrait_section.orientation = WD_ORIENT.PORTRAIT
+                    portrait_section.page_width = Mm(210)
+                    portrait_section.page_height = Mm(297)
+                    portrait_section.top_margin = Inches(0.55)
+                    portrait_section.bottom_margin = Inches(0.55)
+                    portrait_section.left_margin = Inches(0.60)
+                    portrait_section.right_margin = Inches(0.60)
 
                 # Derived ΔE* results, using the same values already calculated in the app.
                 dE_std_report = math.sqrt(dE_std_sq)
