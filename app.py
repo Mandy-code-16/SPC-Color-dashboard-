@@ -48,6 +48,16 @@ st.markdown("""<style>[data-testid="stSidebar"] {background-color: #f6f8fa;}</st
 # FILE UPLOAD DATA SOURCE
 # =========================
 st.sidebar.markdown("### 📂 Data Upload")
+# Diagnostics show session memory use to distinguish large data from Python exceptions.
+with st.sidebar.expander("🩺 App diagnostics", expanded=False):
+    try:
+        import resource
+        _rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        # On Streamlit Cloud/Linux, ru_maxrss is reported in KiB.
+        st.caption(f"Peak process memory (Linux): {_rss / 1024:.0f} MB")
+    except Exception:
+        st.caption("Memory metric unavailable on this server")
+    st.caption("If the server restarts, check Streamlit Cloud logs for OOM / exit code.")
 st.sidebar.caption("Upload the 2 source files used by the SPC app.")
 
 uploaded_data_file = st.sidebar.file_uploader(
@@ -64,7 +74,7 @@ uploaded_limit_file = st.sidebar.file_uploader(
     help="Control-limit table containing Color_code, Control_batch and LAB/LINE LCL-UCL columns."
 )
 
-@st.cache_data(show_spinner=False, max_entries=4)
+@st.cache_data(show_spinner=False, max_entries=2, ttl=1800)
 def read_uploaded_table(file_bytes, file_name):
     """Read an uploaded CSV/Excel file from bytes."""
     name = str(file_name).lower()
@@ -353,7 +363,12 @@ def detect_out_of_control(spc_df, lcl, ucl):
     result["Out_of_Control"] = (result["Rule_CL"] | result["Rule_3Sigma"])
     return result[result["Out_of_Control"]]
 
-@st.cache_data(show_spinner=False, max_entries=12)
+SPC_INPUT_COLUMNS = ["製造批號", "Time"] + [
+    col for factor in ("ΔL", "Δa", "Δb")
+    for col in (f"正-北 {factor}", f"正-南 {factor}", f"入料檢測 {factor} 正面")
+]
+
+@st.cache_data(show_spinner=False, max_entries=3, ttl=1800)
 def calculate_batch_averages(df_filtered_color):
     """Compute paired LAB/LINE batch means, preserving original SPC mathematics.
 
@@ -439,7 +454,7 @@ df = df_color.copy()
 if len(selected_years) > 0: df = df[df["Time"].dt.year.isin(selected_years)]
 if len(selected_months) > 0: df = df[df["Time"].dt.month.isin(selected_months)]
 
-spc_data = calculate_batch_averages(df)
+spc_data = calculate_batch_averages(df[SPC_INPUT_COLUMNS])
 
 # =========================================================
 # PLOTTING CORE ENGINES
@@ -1086,7 +1101,7 @@ elif app_mode == "📋 Limit Status Summary":
             if phase2_batches >= 3:
                 if status == "✅ Yes":
                     max_consec_any_chart, max_total_any_chart = 0, 0
-                    spc_p2 = calculate_batch_averages(df_p2)
+                    spc_p2 = calculate_batch_averages(df_p2[SPC_INPUT_COLUMNS])
                     
                     for f in ["ΔL", "Δa", "Δb"]:
                         for source in ["line", "lab"]:
@@ -1652,16 +1667,8 @@ elif app_mode == "🎛️ Control Limit Calculator":
             chart_bytes = chart_png.getvalue()
             chart_buffers[f] = chart_bytes
 
-            # Separate Word-report chart: larger text + 500 DPI + no CJK text in Matplotlib.
-            report_fig = build_task3_report_chart(pair_f, f)
-            report_png = io.BytesIO()
-            report_fig.savefig(
-                report_png, format="png", dpi=500,
-                bbox_inches="tight", facecolor="white", pad_inches=0.04
-            )
-            report_png.seek(0)
-            report_chart_buffers[f] = report_png.getvalue()
-            plt.close(report_fig)
+            # Generate large 500-DPI Word images only when export is requested.
+            # Keeping them out of routine Streamlit reruns avoids large RAM spikes.
 
             factor_filename = {"ΔL": "DeltaL", "Δa": "Deltaa", "Δb": "Deltab"}.get(f, str(f))
             st.download_button(
@@ -2070,15 +2077,35 @@ elif app_mode == "🎛️ Control Limit Calculator":
             report_buf.seek(0)
             return report_buf.getvalue()
 
-        task3_word_bytes = build_task3_word_report()
         safe_color_name = re.sub(r"[^A-Za-z0-9_-]+", "_", str(color))
-        st.download_button(
-            label="📄 Download Word Report",
-            data=task3_word_bytes,
-            file_name=f"Task3_Incoming_LAB_Control_Limit_{safe_color_name}_{datetime.now().strftime('%Y%m%d')}.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            key=f"task3_word_{safe_color_name}"
-        )
+        report_state_key = "task3_export_payload"
+        report_identity = (uploaded_data_file.name, uploaded_data_file.size,
+                           uploaded_limit_file.name, uploaded_limit_file.size,
+                           str(color), tuple(selected_years), tuple(selected_months))
+        if st.session_state.get("task3_export_identity") != report_identity:
+            st.session_state.pop(report_state_key, None)
+            st.session_state["task3_export_identity"] = report_identity
+        if st.button("📄 Prepare Word Report", key="task3_prepare_word"):
+            with st.spinner("Generating high-resolution report charts and Word file..."):
+                for _factor in factors:
+                    if _factor in calc_res:
+                        _pair = calc_res[_factor]["pair"]
+                        if _pair is not None and not _pair.empty:
+                            _report_fig = build_task3_report_chart(_pair, _factor)
+                            _report_buf = io.BytesIO()
+                            _report_fig.savefig(_report_buf, format="png", dpi=500,
+                                                bbox_inches="tight", facecolor="white", pad_inches=0.04)
+                            report_chart_buffers[_factor] = _report_buf.getvalue()
+                            plt.close(_report_fig)
+                st.session_state[report_state_key] = build_task3_word_report()
+        if st.session_state.get(report_state_key):
+            st.download_button(
+                label="📄 Download Word Report",
+                data=st.session_state[report_state_key],
+                file_name=f"Task3_Incoming_LAB_Control_Limit_{safe_color_name}_{datetime.now().strftime('%Y%m%d')}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                key=f"task3_word_{safe_color_name}"
+            )
 
     # ---------------------------------------------------------
     # Manual LAB ΔE calculator
@@ -2243,7 +2270,7 @@ elif app_mode == "📄 AI OOC Word Report":
                 if c_time is None: continue
 
                 global_batch_order_c = df_c.sort_values("Time")["製造批號"].drop_duplicates().tolist()
-                spc_c = calculate_batch_averages(df_c)
+                spc_c = calculate_batch_averages(df_c[SPC_INPUT_COLUMNS])
                 color_has_ooc = False
 
                 for k in ["ΔL", "Δa", "Δb"]:
@@ -2683,7 +2710,7 @@ elif app_mode == "🎯 KPI Achievement Report":
         if df_p2.empty:
             continue
 
-        spc_p2 = calculate_batch_averages(df_p2)
+        spc_p2 = calculate_batch_averages(df_p2[SPC_INPUT_COLUMNS])
 
         # Use only batches with valid values for all 3 color factors so the
         # denominator is consistent across ΔL / Δa / Δb.
@@ -2959,23 +2986,23 @@ elif app_mode == "🎯 KPI Achievement Report":
             buf.seek(0)
             return buf
 
-        word_report_buf = build_ooc_kpi_word_report(
-            display_report_df,
-            report_source,
-            ooc_target,
-            n_controlled,
-            n_ooc_ok,
-            n_action,
-            n_incomplete
-        )
-
-        st.download_button(
-            "📄 Download Short Word Report for Management",
-            data=word_report_buf,
-            file_name=f"SPC_OOC_KPI_Management_Report_{report_source}_{datetime.now().strftime('%Y%m%d')}.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            key="download_kpi_management_word"
-        )
+        # Word creation is deferred until requested to avoid rebuilding on every filter rerun.
+        if st.button("📄 Prepare Short Word Report for Management", key="prepare_kpi_management_word"):
+            with st.spinner("Preparing management report..."):
+                st.session_state["kpi_word_payload"] = build_ooc_kpi_word_report(
+                    display_report_df, report_source, ooc_target,
+                    n_controlled, n_ooc_ok, n_action, n_incomplete
+                ).getvalue()
+                st.session_state["kpi_word_identity"] = (report_source, ooc_target, len(display_report_df))
+        if (st.session_state.get("kpi_word_payload") and
+                st.session_state.get("kpi_word_identity") == (report_source, ooc_target, len(display_report_df))):
+            st.download_button(
+                "📄 Download Short Word Report for Management",
+                data=st.session_state["kpi_word_payload"],
+                file_name=f"SPC_OOC_KPI_Management_Report_{report_source}_{datetime.now().strftime('%Y%m%d')}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                key="download_kpi_management_word"
+            )
 
         st.markdown("---")
         st.markdown("### 🔎 Color Detail")
