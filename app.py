@@ -1790,6 +1790,193 @@ elif app_mode == "🎛️ Control Limit Calculator":
         )
 
     # ---------------------------------------------------------
+    # NEW: LAB -> LINE Delta E* OUTPUT RISK VALIDATION
+    # Observational paired-batch analysis only; no invented extrapolation.
+    # Original figures, SPC control rules, and calculated limit values unchanged.
+    # ---------------------------------------------------------
+    st.markdown("---")
+    st.markdown("## 🔬 LAB–LINE ΔE* Output Risk Validation / 產出風險驗證")
+    st.caption(
+        "驗證當 LAB ΔL*、Δa*、Δb* 同時符合入料界限時，LINE ΔE* > 1.00 的觀察風險。"
+        "此項分析不以 LINE 各因子之管制界限作為合格判定；產出只以 ΔE* 為標準。"
+    )
+    output_de_threshold = st.number_input(
+        "LINE output ΔE* specification (CIE76)",
+        min_value=0.01, value=1.00, step=0.05, format="%.2f",
+        key="task3_de_output_spec",
+    )
+    st.caption(
+        "Assumes ΔE*76 = sqrt(ΔL*² + Δa*² + Δb*²), relative to the same color target. "
+        "Confirm the factory uses CIE76 and that the three LINE components share the same reference."
+    )
+
+    if len(calc_res) != 3 or paired_all.empty:
+        st.warning("需要完整的 3 項 LAB–LINE 配對資料（ΔL*、Δa*、Δb*），才能驗證 LINE ΔE* 風險。")
+    else:
+        required_pair = [f"LAB_{f}" for f in factors] + [f"LINE_{f}" for f in factors]
+        risk_pairs = paired_all.dropna(subset=required_pair).copy()
+        for _f in factors:
+            risk_pairs[f"Shift_{_f}"] = risk_pairs[f"LINE_{_f}"] - risk_pairs[f"LAB_{_f}"]
+        risk_pairs["LINE_ΔE*"] = np.sqrt(
+            sum(risk_pairs[f"LINE_{_f}"].astype(float) ** 2 for _f in factors)
+        )
+        risk_pairs["LAB_ΔE*"] = np.sqrt(
+            sum(risk_pairs[f"LAB_{_f}"].astype(float) ** 2 for _f in factors)
+        )
+        risk_pairs["LINE_Fail"] = risk_pairs["LINE_ΔE*"] > output_de_threshold
+
+        st.markdown("### 1. LAB → LINE component shift / 色差偏移")
+        shift_rows = []
+        for _f in factors:
+            _delta = risk_pairs[f"Shift_{_f}"].dropna()
+            shift_rows.append({
+                "Factor": delta_label(_f),
+                "Paired n": len(_delta),
+                "LINE − LAB Mean": _delta.mean(),
+                "Shift SD": _delta.std(ddof=1),
+                "Shift Min": _delta.min(),
+                "Shift Max": _delta.max(),
+            })
+        st.dataframe(pd.DataFrame(shift_rows).style.format({
+            "LINE − LAB Mean": "{:.3f}", "Shift SD": "{:.3f}",
+            "Shift Min": "{:.3f}", "Shift Max": "{:.3f}",
+        }, na_rep="—"), use_container_width=True, hide_index=True)
+        st.caption("LINE − LAB 顯示實際生產偏移；三個色差因子可能同時變動，不能視為相互獨立。")
+
+        # Define each LAB acceptance box with exactly the limits computed by Task 3.
+        candidate_methods = {
+            "Standard Method": ("std_lcl", "std_ucl"),
+            "IQR": ("iqr_lcl", "iqr_ucl"),
+            "Recommended (intersection)": ("rec_lcl", "rec_ucl"),
+        }
+        method_rows = []
+        detailed = {}
+        st.markdown("### 2. LINE ΔE* risk conditional on LAB limits / 條件風險")
+        for _method, (_lo_key, _hi_key) in candidate_methods.items():
+            _valid = all(
+                calc_res[_f].get(_lo_key) is not None
+                and calc_res[_f].get(_hi_key) is not None
+                and np.isfinite(calc_res[_f][_lo_key])
+                and np.isfinite(calc_res[_f][_hi_key])
+                and calc_res[_f][_lo_key] <= calc_res[_f][_hi_key]
+                for _f in factors
+            )
+            if not _valid:
+                method_rows.append({
+                    "Method": _method, "LAB accepted (n)": 0,
+                    "LINE ΔE* > spec (n)": None, "Observed risk (%)": np.nan,
+                    "Upper risk 95% (%)": np.nan, "Acceptance (%)": np.nan,
+                    "Result": "Invalid / no overlapping limits",
+                })
+                continue
+            _accept = pd.Series(True, index=risk_pairs.index)
+            for _f in factors:
+                _accept &= risk_pairs[f"LAB_{_f}"].between(
+                    calc_res[_f][_lo_key], calc_res[_f][_hi_key], inclusive="both"
+                )
+            _accepted = risk_pairs.loc[_accept].copy()
+            _n = len(_accepted)
+            _k = int(_accepted["LINE_Fail"].sum())
+            _risk = 100 * _k / _n if _n else np.nan
+            _upper = np.nan
+            if _n:
+                try:
+                    from scipy.stats import beta as _beta_dist
+                    # Exact, one-sided 95% Clopper-Pearson upper bound.
+                    _upper = 100.0 if _k == _n else 100.0 * float(_beta_dist.ppf(0.95, _k + 1, _n - _k))
+                except ImportError:
+                    # Fallback is exact for zero failures; otherwise show no CI.
+                    if _k == 0:
+                        _upper = 100 * (1 - 0.05 ** (1 / _n))
+            method_rows.append({
+                "Method": _method,
+                "LAB accepted (n)": _n,
+                "LINE ΔE* > spec (n)": _k,
+                "Observed risk (%)": _risk,
+                "Upper risk 95% (%)": _upper,
+                "Acceptance (%)": 100 * _n / len(risk_pairs) if len(risk_pairs) else np.nan,
+                "Result": "Limited sample" if _n < 30 else "Historical estimate only",
+            })
+            detailed[_method] = (_accept, _accepted)
+
+        risk_comparison = pd.DataFrame(method_rows)
+        st.dataframe(risk_comparison.style.format({
+            "Observed risk (%)": "{:.2f}", "Upper risk 95% (%)": "{:.2f}",
+            "Acceptance (%)": "{:.1f}",
+        }, na_rep="—"), hide_index=True, use_container_width=True)
+        st.caption(
+            "Observed risk = LINE ΔE* 超標批數 / LAB 三項皆在界限內的批數。"
+            "Upper risk 95% 為單側 Clopper–Pearson 二項分布信賴上界；"
+            "僅在批次可近似視為獨立且失敗率穩定時適用。"
+        )
+        if len(risk_pairs) < 30:
+            st.warning(
+                f"⚠️ 目前僅 {len(risk_pairs)} 個有效配對批次。樣本過少，"
+                "不能據此證明 LAB 合格時 LINE ΔE* 必定 ≤ 1.00，也無法可靠估計極低的失敗率。"
+            )
+        else:
+            st.info(
+                "此為歷史樣本的條件失敗率，不是未來每一批都合格的保證。"
+                "由相同資料計算入料界限及驗證風險可能產生樂觀偏差；建議另以新批次進行驗證。"
+            )
+
+        st.markdown("### 3. Paired batch verification / 逐批驗證")
+        selected_method = st.selectbox(
+            "Select incoming LAB limit method", list(detailed.keys()),
+            key="task3_risk_method",
+        ) if detailed else None
+        if selected_method:
+            chosen_mask, chosen_pairs = detailed[selected_method]
+            batch_view = risk_pairs[[
+                "製造批號", "Time", "LAB_ΔL", "LAB_Δa", "LAB_Δb",
+                "LINE_ΔL", "LINE_Δa", "LINE_Δb", "LAB_ΔE*", "LINE_ΔE*",
+                "Shift_ΔL", "Shift_Δa", "Shift_Δb",
+            ]].copy()
+            batch_view.insert(2, "LAB within all limits", chosen_mask.to_numpy())
+            batch_view["LINE ΔE* status"] = np.where(
+                risk_pairs["LINE_Fail"], "FAIL", "PASS"
+            )
+            st.dataframe(batch_view, hide_index=True, use_container_width=True)
+            fig_risk, ax_risk = plt.subplots(figsize=(10.5, 4.6))
+            seq = np.arange(1, len(risk_pairs) + 1)
+            ax_risk.plot(seq, risk_pairs["LINE_ΔE*"], color="#ed7d31", marker="D",
+                         linewidth=1.7, markersize=5, label="LINE ΔE* output")
+            ax_risk.axhline(output_de_threshold, color="#dc2626", linestyle="--",
+                            linewidth=1.5, label=f"Output specification {output_de_threshold:.2f}")
+            ax_risk.scatter(seq[chosen_mask.to_numpy()],
+                            risk_pairs.loc[chosen_mask, "LINE_ΔE*"],
+                            s=85, facecolors="none", edgecolors="#5b9bd5",
+                            linewidths=1.7, label=f"LAB accepted ({selected_method})", zorder=5)
+            ax_risk.set_xticks(seq)
+            ax_risk.set_xticklabels([str(i) for i in seq])
+            ax_risk.set_xlabel("Batch sequence")
+            ax_risk.set_ylabel("LINE ΔE*")
+            ax_risk.set_title("LINE ΔE* Output vs. LAB Acceptance", fontweight="bold")
+            ax_risk.grid(axis="y", color="#c9c9c9", linewidth=0.8)
+            ax_risk.legend(loc="best", frameon=False)
+            st.pyplot(fig_risk)
+            plt.close(fig_risk)
+
+            output_buf = io.BytesIO()
+            with pd.ExcelWriter(output_buf, engine="openpyxl") as w:
+                risk_comparison.to_excel(w, sheet_name="Method_Risk_Comparison", index=False)
+                pd.DataFrame(shift_rows).to_excel(w, sheet_name="LAB_LINE_Shift", index=False)
+                batch_view.to_excel(w, sheet_name="Paired_Batch_Check", index=False)
+                pd.DataFrame([
+                    {"Setting": "Color code", "Value": str(color)},
+                    {"Setting": "Output DE specification", "Value": output_de_threshold},
+                    {"Setting": "Selected LAB method", "Value": selected_method},
+                    {"Setting": "LINE DE calculation", "Value": "CIE76 from paired LINE mean components"},
+                    {"Setting": "Caution", "Value": "In-sample exploratory validation; use new batches to confirm"},
+                ]).to_excel(w, sheet_name="Method_Notes", index=False)
+            st.download_button(
+                "📥 Download LAB–LINE Output Risk (Excel)", output_buf.getvalue(),
+                file_name=f"{_safe_color_name}_LAB_LINE_Output_Risk.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="task3_risk_export",
+            )
+
+    # ---------------------------------------------------------
     # Task 3 Word Report Export
     # ---------------------------------------------------------
     if calc_res:
