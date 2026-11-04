@@ -64,7 +64,7 @@ uploaded_limit_file = st.sidebar.file_uploader(
     help="Control-limit table containing Color_code, Control_batch and LAB/LINE LCL-UCL columns."
 )
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=4)
 def read_uploaded_table(file_bytes, file_name):
     """Read an uploaded CSV/Excel file from bytes."""
     name = str(file_name).lower()
@@ -136,14 +136,30 @@ def clean_column_names(df):
 df_raw = clean_column_names(df_raw)
 limit_df = clean_column_names(limit_df)
 
-required_data_cols = ["Time", "製造批號", "塗料編號"]
+# Validate ALL columns required by calculate_batch_averages() before any View runs.
+# Never fill missing color measurements with zero: that would corrupt SPC.
+required_data_cols = [
+    "Time", "製造批號", "塗料編號",
+    "入料檢測 ΔL 正面", "入料檢測 Δa 正面", "入料檢測 Δb 正面",
+    "正-北 ΔL", "正-南 ΔL", "正-北 Δa", "正-南 Δa",
+    "正-北 Δb", "正-南 Δb",
+]
 missing_data_cols = [c for c in required_data_cols if c not in df_raw.columns]
 if missing_data_cols:
     st.error(
         "❌ File 1 (Production / SPC Data) is missing required columns: "
         + ", ".join(missing_data_cols)
     )
+    st.caption("Available columns in Production / SPC Data:")
+    st.code(" | ".join(map(str, df_raw.columns)))
     st.stop()
+
+# Ambiguous or duplicate column headers can also produce incorrect calculations.
+for source_name, frame in [("Production / SPC Data", df_raw), ("Control Limit Data", limit_df)]:
+    duplicate_names = frame.columns[frame.columns.duplicated()].tolist()
+    if duplicate_names:
+        st.error(f"❌ Duplicate column names in {source_name}: {duplicate_names}")
+        st.stop()
 
 required_limit_cols = ["Color_code"]
 missing_limit_cols = [c for c in required_limit_cols if c not in limit_df.columns]
@@ -154,9 +170,16 @@ if missing_limit_cols:
     )
     st.stop()
 
-# Parse time after upload.
-df_raw["Time"] = pd.to_datetime(df_raw["Time"], errors="coerce")
-df_raw = df_raw.dropna(subset=["Time"])
+# Parse time after upload, including mixed timestamp styles.
+# Preserve the original Time column semantics; discard only invalid dates.
+df_raw["Time"] = pd.to_datetime(df_raw["Time"], errors="coerce", format="mixed")
+invalid_time_rows = int(df_raw["Time"].isna().sum())
+df_raw = df_raw.dropna(subset=["Time"]).copy()
+if df_raw.empty:
+    st.error("❌ No valid Time values found in the uploaded Production / SPC Data.")
+    st.stop()
+if invalid_time_rows:
+    st.sidebar.warning(f"⚠ {invalid_time_rows:,} rows removed: invalid Time values.")
 
 st.sidebar.success(
     f"✅ Data loaded\n\n"
@@ -168,7 +191,17 @@ st.sidebar.success(
 df_raw = df_raw.dropna(subset=["製造批號"])
 df_raw["製造批號"] = df_raw["製造批號"].astype(str).str.strip()
 df_raw = df_raw[df_raw["製造批號"] != ""]
-df_raw = df_raw[df_raw["製造批號"].str.lower() != "nan"]
+df_raw = df_raw[df_raw["製造批號"].str.lower() != "nan"].copy()
+if df_raw.empty:
+    st.error("❌ No valid 製造批號 values remain after cleaning the uploaded data.")
+    st.stop()
+
+# Blank paint codes would make the color selector fail.
+df_raw["塗料編號"] = df_raw["塗料編號"].astype("string").str.strip()
+df_raw["塗料編號"] = df_raw["塗料編號"].replace({"": pd.NA, "nan": pd.NA, "None": pd.NA})
+if df_raw["塗料編號"].dropna().empty:
+    st.error("❌ No valid 塗料編號 (color codes) in the uploaded data.")
+    st.stop()
 
 numeric_columns = [
     "入料檢測 ΔL 正面", "入料檢測 Δa 正面", "入料檢測 Δb 正面",
@@ -290,6 +323,8 @@ def get_control_batch(color):
     mask = limit_df["Color_code"].astype(str).str.strip().str.upper() == c_search
     row = limit_df[mask]
     if row.empty: return None
+    if "Control_batch" not in row.columns:
+        return None  # Missing control-start metadata: leave Phase II undefined.
     value = row["Control_batch"].values[0]
     if pd.isna(value): return None
     if isinstance(value, str):
@@ -318,29 +353,50 @@ def detect_out_of_control(spc_df, lcl, ucl):
     result["Out_of_Control"] = (result["Rule_CL"] | result["Rule_3Sigma"])
     return result[result["Out_of_Control"]]
 
+@st.cache_data(show_spinner=False, max_entries=12)
 def calculate_batch_averages(df_filtered_color):
+    """Compute paired LAB/LINE batch means, preserving original SPC mathematics.
+
+    Cached across Streamlit reruns for identical filtered data. Input and output
+    contain only the essential columns; no repeated whole-frame copies per factor.
+    """
     res = {}
-    for f in ["ΔL", "Δa", "Δb"]:
-        tmp = df_filtered_color.copy()
-        
-        # Calculate LINE average
+    required = ["製造批號", "Time"] + [
+        c for f in ("ΔL", "Δa", "Δb")
+        for c in (f"正-北 {f}", f"正-南 {f}", f"入料檢測 {f} 正面")
+    ]
+    missing = [c for c in required if c not in df_filtered_color.columns]
+    if missing:
+        raise ValueError(f"Missing columns required for SPC batch calculation: {missing}")
+
+    # Reuse one small numeric frame rather than copying the complete file 3 times.
+    tmp = df_filtered_color.loc[:, required].copy()
+    for c in required[2:]:
+        tmp[c] = pd.to_numeric(tmp[c], errors="coerce")
+
+    for f in ("ΔL", "Δa", "Δb"):
         col_n, col_s = f"正-北 {f}", f"正-南 {f}"
-        tmp[col_n] = pd.to_numeric(tmp[col_n], errors='coerce')
-        tmp[col_s] = pd.to_numeric(tmp[col_s], errors='coerce')
-        tmp["row_avg"] = tmp[[col_n, col_s]].mean(axis=1)
-        line_b = tmp.groupby("製造批號", as_index=False).agg({"Time": "min", "row_avg": "mean"}).rename(columns={"row_avg": "value"}).sort_values("Time").dropna()
-        
-        # Calculate LAB average
         col_lab = f"入料檢測 {f} 正面"
-        tmp[col_lab] = pd.to_numeric(tmp[col_lab], errors='coerce')
-        lab_b = tmp.groupby("製造批號", as_index=False).agg({"Time": "min", col_lab: "mean"}).rename(columns={col_lab: "value"}).sort_values("Time").dropna()
-        
-        # CRITICAL FIX: Enforce Strict 1:1 Intersection
+        # Same rules as before: NORTH/SOUTH row mean; group by batch; paired-only.
+        row_avg = tmp[[col_n, col_s]].mean(axis=1)
+        line_b = (
+            pd.DataFrame({"製造批號": tmp["製造批號"], "Time": tmp["Time"], "row_avg": row_avg})
+            .groupby("製造批號", as_index=False)
+            .agg({"Time": "min", "row_avg": "mean"})
+            .rename(columns={"row_avg": "value"})
+            .sort_values("Time").dropna()
+        )
+        lab_b = (
+            tmp.groupby("製造批號", as_index=False)
+            .agg({"Time": "min", col_lab: "mean"})
+            .rename(columns={col_lab: "value"})
+            .sort_values("Time").dropna()
+        )
         common_batches = set(line_b["製造批號"]).intersection(set(lab_b["製造批號"]))
-        line_b = line_b[line_b["製造批號"].isin(common_batches)]
-        lab_b = lab_b[lab_b["製造批號"].isin(common_batches)]
-        
-        res[f] = {"line": line_b, "lab": lab_b}
+        res[f] = {
+            "line": line_b[line_b["製造批號"].isin(common_batches)],
+            "lab": lab_b[lab_b["製造批號"].isin(common_batches)],
+        }
     return res
 
 # =========================
@@ -547,7 +603,10 @@ if app_mode == "🚀 Main Dashboard":
         row = limit_df[mask]
         if row.empty: return
         table = row.filter(like=factor).copy()
-        for c in table.columns: table[c] = table[c].map(lambda x: f"{x:.2f}" if pd.notnull(x) else "")
+        for c in table.columns:
+            table[c] = table[c].map(
+                lambda x: f"{float(x):.2f}" if pd.notna(x) and pd.to_numeric(x, errors="coerce") == pd.to_numeric(x, errors="coerce") else (str(x) if pd.notna(x) else "")
+            )
         st.sidebar.markdown(f"**{factor} Control Limits (Sheet)**")
         st.sidebar.dataframe(table, use_container_width=True, hide_index=True)
 
@@ -705,7 +764,7 @@ if app_mode == "🚀 Main Dashboard":
         lab_lim = safe_get_limit(color, "LAB", k)
         line_lim = safe_get_limit(color, "LINE", k)
         fig = spc_combined(spc_data[k]["lab"], spc_data[k]["line"], f"COMBINED {delta_label(k)}", lab_lim, line_lim, control_batch_code, global_batch_order)
-        st.pyplot(fig); download(fig, f"COMBINED_{color}_{k}.png")
+        st.pyplot(fig); download(fig, f"COMBINED_{color}_{k}.png"); plt.close(fig)
 
     st.markdown("---")
     st.subheader("📊 SPC Combined Chart (LAB + LINE) – Phase II")
@@ -713,7 +772,7 @@ if app_mode == "🚀 Main Dashboard":
         lab_lim = safe_get_limit(color, "LAB", k)
         line_lim = safe_get_limit(color, "LINE", k)
         fig = spc_combined_phase2(spc_data[k]["lab"], spc_data[k]["line"], f"{delta_label(k)} – LAB + LINE (Phase II)", lab_lim, line_lim, control_batch_code, control_time, global_batch_order)
-        if fig is not None: st.pyplot(fig); download(fig, f"COMBINED_PHASE2_{color}_{k}.png")
+        if fig is not None: st.pyplot(fig); download(fig, f"COMBINED_PHASE2_{color}_{k}.png"); plt.close(fig)
         else: st.info(f"{k}: Not enough Phase II data")
 
     st.markdown("---")
@@ -740,6 +799,7 @@ if app_mode == "🚀 Main Dashboard":
             ax.set_title(f"{delta_label(k)} (LINE)"); ax.grid(axis="y", alpha=0.3); ax.legend(fontsize=8); st.pyplot(fig)
             buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=150, bbox_inches="tight"); buf.seek(0)
             st.download_button("⬇ Download", data=buf, file_name=f"{k}_line_dist.png", mime="image/png", key=f"dl_line_dist_{k}")
+            plt.close(fig)
 
     st.markdown("---")
     st.markdown("## 🧪 LAB Process Distribution Dashboard")
@@ -764,6 +824,7 @@ if app_mode == "🚀 Main Dashboard":
             ax.set_title(f"{delta_label(k)} (LAB)"); ax.grid(axis="y", alpha=0.3); ax.legend(fontsize=8); st.pyplot(fig)
             buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=150, bbox_inches="tight"); buf.seek(0)
             st.download_button("⬇ Download", data=buf, file_name=f"{k}_lab_dist.png", mime="image/png", key=f"dl_lab_dist_{k}")
+            plt.close(fig)
 
     # Section: OOC TABLE
     st.markdown("## 🚨 Out-of-Control Batches")
@@ -840,6 +901,7 @@ if app_mode == "🚀 Main Dashboard":
             ax.legend()
             ax.grid(True, linestyle="--", alpha=0.4)
             st.pyplot(fig)
+            plt.close(fig)
 
             st.subheader("📈 ΔE* Distribution (Per Coil)")
             fig2, ax2 = plt.subplots(figsize=(10, 4))
@@ -857,10 +919,11 @@ if app_mode == "🚀 Main Dashboard":
                 ax2.legend()
                 ax2.grid(True, linestyle="--", alpha=0.4)
                 st.pyplot(fig2)
+            plt.close(fig2)
 
             st.subheader("📊 Average Thickness Distribution")
             data = df_plot[thickness_col].dropna()
-            if len(data) > 0:
+            if len(data) >= 2 and pd.notna(data.std()) and data.std() > 0:
                 mean, std = data.mean(), data.std()
                 col1, col2 = st.columns(2)
                 with col1: LSL = st.number_input("LSL", value=float(mean - 3 * std), key="bottom_lsl")
@@ -883,6 +946,7 @@ if app_mode == "🚀 Main Dashboard":
                     ax.grid(True, linestyle="--", alpha=0.4)
                     ax.legend()
                     st.pyplot(fig)
+                    plt.close(fig)
 
             with st.expander("📋 Coil Summary Data"):
                 st.dataframe(df_plot[[coil_col, thickness_col, dE_col, dL_col, da_col, db_col, time_col]].sort_values(by=dE_col, ascending=False), use_container_width=True)
@@ -931,16 +995,17 @@ if app_mode == "🚀 Main Dashboard":
                             ax.legend()
                             ax.grid(True, linestyle="--", alpha=0.4)
                             st.pyplot(fig)
+                            plt.close(fig)
 
                             st.markdown("### 🧠 Interpretation")
                             st.markdown("""
                             **📊 Correlation Levels Reference:**
                             
-                            | Level | Correlation Coefficient (\|R\|) | Coefficient of Determination (R²) | Interpretation |
+                            | Level | Correlation Coefficient (\\|R\\|) | Coefficient of Determination (R²) | Interpretation |
                             | :--- | :--- | :--- | :--- |
-                            | 🔴 **Strong** | \|R\| ≥ 0.77 | R² ≥ 0.60 | Thickness strongly affects and explains most of the color variation. |
-                            | 🟠 **Moderate**| 0.55 ≤ \|R\| < 0.77 | 0.30 ≤ R² < 0.60 | Thickness partially contributes to color drift. |
-                            | 🟢 **Weak/Low** | \|R\| < 0.55 | R² < 0.30 | Thickness is unlikely the main driver of color variation. |
+                            | 🔴 **Strong** | \\|R\\| ≥ 0.77 | R² ≥ 0.60 | Thickness strongly affects and explains most of the color variation. |
+                            | 🟠 **Moderate**| 0.55 ≤ \\|R\\| < 0.77 | 0.30 ≤ R² < 0.60 | Thickness partially contributes to color drift. |
+                            | 🟢 **Weak/Low** | \\|R\\| < 0.55 | R² < 0.30 | Thickness is unlikely the main driver of color variation. |
                             """)
 
                             if r2 is not None:
