@@ -1255,41 +1255,19 @@ elif app_mode == "🎛️ Control Limit Calculator":
     # ---------------------------------------------------------
     st.markdown("### 📋 LAB 入料色差統計與 ±1.5σ 管制界限")
     st.caption(
-        "只以 LAB ΔE* ≤ 0.50 且 LINE ΔE* ≤ 1.00 的完整配對製造批號，"
-        "計算 LAB Min、Max、平均值 (x̄)、標準差 (σ) 及 x̄ ± 1.5σ；少於 3 批時不計算。"
+        "僅針對 LAB 入料資料，以各製造批號之平均值計算 Min、Max、平均值 (x̄)、標準差 (σ)，"
+        "並以 x̄ ± 1.5σ 計算 LCL / UCL。"
     )
-
-    # Identify qualified paired batches BEFORE the descriptive ±1.5σ table,
-    # so it follows the same LAB and LINE quality criteria as the IQR table.
-    _q_frames = []
-    for _q_f in factors:
-        _q_lab = spc_data[_q_f]["lab"][["製造批號", "value"]].rename(
-            columns={"value": f"LAB_{_q_f}"})
-        _q_line = spc_data[_q_f]["line"][["製造批號", "value"]].rename(
-            columns={"value": f"LINE_{_q_f}"})
-        _q_frames.extend([_q_lab, _q_line])
-    _q_all = _q_frames[0]
-    for _q_part in _q_frames[1:]:
-        _q_all = _q_all.merge(_q_part, on="製造批號", how="inner")
-    _q_numcols = [f"{_q_group}_{_q_f}" for _q_group in ("LAB", "LINE") for _q_f in factors]
-    for _q_col in _q_numcols:
-        _q_all[_q_col] = pd.to_numeric(_q_all[_q_col], errors="coerce")
-    _q_all = _q_all.replace([np.inf, -np.inf], np.nan).dropna(subset=_q_numcols)
-    _q_lab_de = np.linalg.norm(_q_all[[f"LAB_{_q_f}" for _q_f in factors]].to_numpy(dtype=float), axis=1)
-    _q_line_de = np.linalg.norm(_q_all[[f"LINE_{_q_f}" for _q_f in factors]].to_numpy(dtype=float), axis=1)
-    _task3_eligible_ids = set(_q_all.loc[(_q_lab_de <= .50) & (_q_line_de <= 1.00), "製造批號"])
 
     summary_sigma_k = 1.5
     task3_stats_rows = []
 
     for _f in factors:
-        _q_labs = spc_data[_f]["lab"]
         _vals = pd.to_numeric(
-            _q_labs.loc[_q_labs["製造批號"].isin(_task3_eligible_ids), "value"],
-            errors="coerce"
+            spc_data[_f]["lab"]["value"], errors="coerce"
         ).dropna()
 
-        if len(_vals) >= 3:
+        if len(_vals) > 0:
             _min = _vals.min()
             _max = _vals.max()
             _mean = _vals.mean()
@@ -1314,19 +1292,16 @@ elif app_mode == "🎛️ Control Limit Calculator":
     task3_stats_df = pd.DataFrame(task3_stats_rows)
     st.dataframe(
         task3_stats_df.style.format({
-            "Min": fmt_num_trim,
-            "Max": fmt_num_trim,
-            "平均值 (x̄)": fmt_num_trim,
-            "標準差 (σ)": fmt_num_trim,
-            "LCL (-1.5σ)": fmt_num_trim,
-            "UCL (+1.5σ)": fmt_num_trim,
+            "Min": "{:.3f}",
+            "Max": "{:.3f}",
+            "平均值 (x̄)": "{:.3f}",
+            "標準差 (σ)": "{:.3f}",
+            "LCL (-1.5σ)": "{:.3f}",
+            "UCL (+1.5σ)": "{:.3f}",
         }, na_rep="-"),
         hide_index=True,
         use_container_width=True,
     )
-
-    if len(_task3_eligible_ids) < 3:
-        st.warning(f"符合 LAB ΔE* ≤ 0.50 且 LINE ΔE* ≤ 1.00 的有效批次僅 {len(_task3_eligible_ids)}；統計界限未建立。")
 
     # Download the Task 3 statistical summary table for the selected color
     _safe_color_name = re.sub(r'[^A-Za-z0-9._-]+', '_', str(color)).strip('_') or 'Color'
@@ -1395,33 +1370,6 @@ elif app_mode == "🎛️ Control Limit Calculator":
             paired_all[_c] = pd.to_datetime(paired_all[_c], errors="coerce")
         paired_all["Time"] = paired_all[_time_cols].min(axis=1)
         paired_all = paired_all.sort_values(["Time", "製造批號"]).reset_index(drop=True)
-
-        # Quality gate used for CALCULATING new incoming LAB limits.
-        # Do not remove rejected rows from the original chart or Shift history.
-        _quality_cols = [f"LAB_{f}" for f in ("ΔL", "Δa", "Δb")] + [
-            f"LINE_{f}" for f in ("ΔL", "Δa", "Δb")]
-        _quality_numeric = paired_all[_quality_cols].apply(pd.to_numeric, errors="coerce")
-        _complete_quality = np.isfinite(_quality_numeric.to_numpy(dtype=float)).all(axis=1)
-        paired_all["LAB ΔE* (CIE76)"] = np.sqrt(
-            sum(_quality_numeric[f"LAB_{f}"] ** 2 for f in ("ΔL", "Δa", "Δb")))
-        paired_all["LINE ΔE* (CIE76)"] = np.sqrt(
-            sum(_quality_numeric[f"LINE_{f}"] ** 2 for f in ("ΔL", "Δa", "Δb")))
-        paired_all["LAB_Quality_OK"] = (_complete_quality &
-            (paired_all["LAB ΔE* (CIE76)"] <= 0.50))
-        paired_all["LINE_Quality_OK"] = (_complete_quality &
-            (paired_all["LINE ΔE* (CIE76)"] <= 1.00))
-        paired_all["IQR_Quality_OK"] = (paired_all["LAB_Quality_OK"] &
-                                         paired_all["LINE_Quality_OK"])
-        _quality_n_total = int(_complete_quality.sum())
-        st.markdown("### LAB / LINE 品質條件篩選（供 IQR / Standard 計算）")
-        _quality_summary = pd.DataFrame([
-            {"判定項目": "完整配對批數", "品質條件": "三項 LAB / LINE 均有值", "批數": _quality_n_total},
-            {"判定項目": "LAB 入料合格", "品質條件": "LAB ΔE* ≤ 0.50", "批數": int(paired_all["LAB_Quality_OK"].sum())},
-            {"判定項目": "LINE 產出合格", "品質條件": "LINE ΔE* ≤ 1.00", "批數": int(paired_all["LINE_Quality_OK"].sum())},
-            {"判定項目": "IQR / Standard 有效批次", "品質條件": "LAB 與 LINE 同時合格", "批數": int(paired_all["IQR_Quality_OK"].sum())},
-        ])
-        st.dataframe(_quality_summary, use_container_width=True, hide_index=True)
-        st.caption("入料與產出 ΔE* 採同批 ΔL*、Δa*、Δb* 計算；僅使用雙方均合格的批次建立 IQR / Standard 建議界限。原始趨勢圖仍顯示全部配對批次。")
 
         display_paired = paired_all[[
             "製造批號", "Time",
@@ -1539,27 +1487,30 @@ elif app_mode == "🎛️ Control Limit Calculator":
         lab_lcl_sheet, lab_ucl_sheet = safe_get_limit(color, "LAB", f)
         line_lcl_sheet, line_ucl_sheet = safe_get_limit(color, "LINE", f)
 
-        # Use the SAME batch-level quality gate for all three components.
-        # No fallback to nonconforming history when too few records remain.
-        pair_f = pair_f.merge(
-            paired_all[["製造批號", "IQR_Quality_OK"]], on="製造批號", how="left"
-        )
-        pair_f["LINE_Status"] = np.where(pair_f["IQR_Quality_OK"], "LAB/LINE Pass", "Not eligible")
-        safe_lab = pd.to_numeric(
-            pair_f.loc[pair_f["IQR_Quality_OK"].fillna(False), "LAB"], errors="coerce"
-        ).dropna()
-        filter_note = (
-            "IQR / Standard 使用同一製造批號 LAB ΔE* ≤ 0.50 且 LINE ΔE* ≤ 1.00 "
-            "的完整配對批次；未合格批次不納入建界限統計。"
-        )
-        if len(safe_lab) < 3:
-            st.warning(
-                f"{delta_label(f)}：符合 LAB / LINE 品質條件的配對批數僅 {len(safe_lab)}，"
-                "未達最低計算門檻 3 批，停止建議界限計算（不回退至不合格資料）。"
+        # Use LINE in-control batches to learn which incoming LAB values are associated
+        # with acceptable downstream output. If LINE limits are unavailable, use all pairs.
+        if line_lcl_sheet is not None and line_ucl_sheet is not None:
+            pair_f["LINE_Status"] = np.where(
+                (pair_f["LINE"] >= line_lcl_sheet) & (pair_f["LINE"] <= line_ucl_sheet),
+                "In Control",
+                "OOC"
             )
-            # Original chart still available in the batch-pair table above.
-            st.markdown("---")
-            continue
+            safe_lab = pair_f.loc[pair_f["LINE_Status"] == "In Control", "LAB"].dropna()
+            filter_note = (
+                f"LAB candidate limits are calculated from paired batches whose LINE output is within "
+                f"the current LINE range [{line_lcl_sheet:.3f}, {line_ucl_sheet:.3f}]."
+            )
+        else:
+            pair_f["LINE_Status"] = "No LINE limit"
+            safe_lab = pair_f["LAB"].dropna()
+            filter_note = (
+                "Current LINE control limits are not configured, so all paired batches are used for the LAB calculation."
+            )
+
+        if len(safe_lab) < 3:
+            # Avoid unstable statistics caused by an excessively small filtered subset.
+            safe_lab = pair_f["LAB"].dropna()
+            filter_note += " Fewer than 3 LINE-in-control pairs were available, so all paired LAB values were used."
 
         m = safe_lab.mean()
         s = safe_lab.std()
@@ -1830,7 +1781,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
         st.dataframe(incoming_summary, hide_index=True, use_container_width=True)
         st.caption(
             "Recommended LAB limits are the intersection of Mean ± Kσ and IQR limits calculated from "
-            "batches meeting LAB ΔE* ≤ 0.50 and LINE ΔE* ≤ 1.00 simultaneously."
+            "incoming LAB values associated with acceptable LINE outputs whenever current LINE limits are available."
         )
 
         dE_std = math.sqrt(dE_std_sq)
@@ -1867,387 +1818,313 @@ elif app_mode == "🎛️ Control Limit Calculator":
         )
 
     # ---------------------------------------------------------
-    # HISTORICAL LAB–LINE RISK SIMULATION — SINGLE SELECTED COLOR
-    # Replaces the older worst-case/ratio-search/multi-color report view.
-    # Does not change existing IQR, SPC calculations, or any original charts.
+    # IQR POST-VALIDATION: DO NOT CHANGE EXISTING IQR CALCULATION
+    # Stage 1: check full IQR LAB interval against LAB Delta E <= 0.50.
+    # Stage 2: assess actual LINE Delta E <= 1.00 from historical paired shifts.
+    # Stage 3: compare simple, optional LAB narrowing candidates.
+    # No individual LINE factor LCL/UCL is used for the output pass/fail here.
     # ---------------------------------------------------------
     st.markdown("---")
-    st.markdown("## 🔬 LAB–LINE 歷史風險模擬與建議入料範圍")
-    st.caption(
-        "僅分析側邊欄所選色號與時間範圍。利用同一製造批號的完整 LAB–LINE 三因子配對資料，"
-        "保留每批 Shift = LINE − LAB 的三項聯動關係，評估不同 LAB 入料範圍下之 LINE ΔE* 風險。"
-    )
-    if len(calc_res) != 3 or paired_all.empty:
-        st.warning("缺少完整的 LAB–LINE 三因子配對批次，無法進行風險模擬。")
+    st.markdown("## 🔬 IQR 入料界限驗證 → LINE 產出風險模擬")
+    st.caption("保留原有 IQR 公式、計算批次及 k 值不變；以下僅檢查 IQR 計算後之 LAB ΔE*，再模擬 LINE ΔE*。")
+
+    _risk_factors = ("ΔL", "Δa", "Δb")
+    _risk_pair_cols = [f"LAB_{f}" for f in _risk_factors] + [f"LINE_{f}" for f in _risk_factors]
+    if len(calc_res) != 3 or paired_all.empty or not all(c in paired_all.columns for c in _risk_pair_cols):
+        st.warning("缺少完整 IQR 界限或 LAB–LINE 三因子配對資料，無法進行後續驗證。")
     else:
-        _factors_risk = ("ΔL", "Δa", "Δb")
-        _paired_cols = ([f"LAB_{f}" for f in _factors_risk]
-                        + [f"LINE_{f}" for f in _factors_risk])
-        _risk_data = paired_all.dropna(subset=_paired_cols).copy()
-        for _f in _factors_risk:
-            _risk_data[f"LAB_{_f}"] = pd.to_numeric(_risk_data[f"LAB_{_f}"], errors="coerce")
-            _risk_data[f"LINE_{_f}"] = pd.to_numeric(_risk_data[f"LINE_{_f}"], errors="coerce")
-        _risk_data = _risk_data.replace([np.inf, -np.inf], np.nan).dropna(subset=_paired_cols)
-        if len(_risk_data) < 3:
-            st.warning("完整三因子配對批次少於 3 批，無法建立歷史 Shift 模擬。請先補充資料。")
+        _iqr_valid = all(
+            np.isfinite(calc_res[f].get("iqr_lcl", np.nan))
+            and np.isfinite(calc_res[f].get("iqr_ucl", np.nan))
+            and calc_res[f]["iqr_lcl"] < calc_res[f]["iqr_ucl"]
+            for f in _risk_factors
+        )
+        _risk_pairs = paired_all[["製造批號", "Time"] + _risk_pair_cols].copy()
+        for _c in _risk_pair_cols:
+            _risk_pairs[_c] = pd.to_numeric(_risk_pairs[_c], errors="coerce")
+        _risk_pairs = _risk_pairs.replace([np.inf, -np.inf], np.nan).dropna(subset=_risk_pair_cols)
+        if not _iqr_valid:
+            st.warning("本次 IQR 界限未完整建立，請先檢查原有 Task 3 IQR 計算結果。")
+        elif len(_risk_pairs) < 3:
+            st.warning("完整 LAB–LINE 配對資料不足 3 批，無法執行歷史風險模擬。IQR 計算不受影響。")
         else:
-            _risk_method = st.selectbox(
-                "LAB 入料界限來源",
-                ("Recommended (intersection)", "IQR", "Standard Method"),
-                key="task3_sim_method",
-                help="沿用 Task 3 即時計算的界限，不使用其他色號或固定預設值。",
-            )
-            _limit_keys = {
-                "Recommended (intersection)": ("rec_lcl", "rec_ucl"),
-                "IQR": ("iqr_lcl", "iqr_ucl"),
-                "Standard Method": ("std_lcl", "std_ucl"),
-            }
-            _low_key, _high_key = _limit_keys[_risk_method]
-            _limits_valid = all(
-                calc_res[_f].get(_low_key) is not None
-                and calc_res[_f].get(_high_key) is not None
-                and np.isfinite(calc_res[_f][_low_key])
-                and np.isfinite(calc_res[_f][_high_key])
-                and calc_res[_f][_low_key] < calc_res[_f][_high_key]
-                for _f in _factors_risk
-            )
-            if not _limits_valid:
-                st.warning("目前選擇的三項 LAB 界限無效或無交集，請改選 IQR 或 Standard Method。")
-            else:
-                _risk_lows = np.array([calc_res[_f][_low_key] for _f in _factors_risk], dtype=float)
-                _risk_highs = np.array([calc_res[_f][_high_key] for _f in _factors_risk], dtype=float)
-                _lab_array = _risk_data[[f"LAB_{f}" for f in _factors_risk]].to_numpy(dtype=float)
-                _line_array = _risk_data[[f"LINE_{f}" for f in _factors_risk]].to_numpy(dtype=float)
-                _shift_array = _line_array - _lab_array
-                _line_de = np.linalg.norm(_line_array, axis=1)
-                _risk_data["LINE ΔE* (CIE76)"] = _line_de
-                for _idx, _f in enumerate(_factors_risk):
-                    _risk_data[f"Shift_{_f}"] = _shift_array[:, _idx]
-                _risk_spec = st.number_input(
-                    "LINE ΔE* 產出標準", min_value=0.01, value=1.00,
-                    step=0.05, format="%.2f", key="task3_sim_spec",
-                )
-                _risk_target = st.selectbox(
-                    "模擬超標率參考門檻", (5.0, 10.0, 1.0),
-                    key="task3_sim_target", format_func=lambda x: f"{x:g}%",
-                )
-                st.caption(
-                    "模型假設：LAB 三項在候選範圍內均勻抽樣且 LAB ΔE* ≤ 0.50；Shift 從歷史完整配對批次（包括 LINE NG）有放回抽樣。"
-                    "此比例為假設情境下的模擬結果，並非實際未來不良率。"
-                )
+            _lo = np.array([calc_res[f]["iqr_lcl"] for f in _risk_factors], dtype=float)
+            _hi = np.array([calc_res[f]["iqr_ucl"] for f in _risk_factors], dtype=float)
+            _lab_limit = 0.50
+            _line_limit = 1.00
+            _lab_hist = _risk_pairs[[f"LAB_{f}" for f in _risk_factors]].to_numpy(dtype=float)
+            _line_hist = _risk_pairs[[f"LINE_{f}" for f in _risk_factors]].to_numpy(dtype=float)
+            _hist_shift = _line_hist - _lab_hist
+            _lab_de_hist = np.linalg.norm(_lab_hist, axis=1)
+            _line_de_hist = np.linalg.norm(_line_hist, axis=1)
+            _risk_pairs["LAB ΔE*"] = _lab_de_hist
+            _risk_pairs["LINE ΔE*"] = _line_de_hist
+            for _ix, _f in enumerate(_risk_factors):
+                _risk_pairs[f"Shift_{_f}"] = _hist_shift[:, _ix]
+            _box_max_components = np.maximum(np.abs(_lo), np.abs(_hi))
+            _box_max_de = float(np.linalg.norm(_box_max_components))
+            _iqr_guarantees_lab = _box_max_de <= _lab_limit + 1e-12
+            _hist_iqr_mask = np.all((_lab_hist >= _lo) & (_lab_hist <= _hi), axis=1)
+            _hist_lab_pass = _lab_de_hist <= _lab_limit
+            _hist_line_pass = _line_de_hist <= _line_limit
+            _hist_accepted = _hist_iqr_mask & _hist_lab_pass
 
-                # Full data fingerprint means results cannot silently carry over
-                # after upload, color, date selection, control factor k, or spec changes.
-                import hashlib as _risk_hashlib
-                _fingerprint_parts = (_risk_data[_paired_cols]
-                                      .astype(float).to_numpy(dtype="<f8").tobytes()
-                                      + _risk_lows.astype("<f8").tobytes()
-                                      + _risk_highs.astype("<f8").tobytes()
-                                      + np.array([_risk_spec, _risk_target, 0.50, 2.0], dtype="<f8").tobytes()
-                                      + str(color).encode("utf-8")
-                                      + _risk_method.encode("utf-8"))
-                _risk_signature = _risk_hashlib.sha256(_fingerprint_parts).hexdigest()
-                _stored_risk = st.session_state.get("task3_historical_sim_result")
-                if _stored_risk is not None and _stored_risk.get("signature") != _risk_signature:
-                    st.session_state.pop("task3_historical_sim_result", None)
-                    _stored_risk = None
+            st.markdown("### ① IQR 界限是否符合 LAB ΔE* ≤ 0.50？")
+            _table_iqr = pd.DataFrame({
+                "色差因子": ["ΔL*", "Δa*", "Δb*"],
+                "IQR LCL": [fmt_num_trim(x) for x in _lo],
+                "IQR UCL": [fmt_num_trim(x) for x in _hi],
+                "最不利絕對值": [fmt_num_trim(x) for x in _box_max_components],
+            })
+            st.dataframe(_table_iqr, hide_index=True, use_container_width=True)
+            _iqr_a, _iqr_b, _iqr_c = st.columns(3)
+            _iqr_a.metric("IQR 範圍最大 LAB ΔE*", fmt_num_trim(_box_max_de))
+            _iqr_b.metric("LAB 入料標準", "≤ 0.5")
+            _iqr_c.metric("IQR 全區間判定", "符合" if _iqr_guarantees_lab else "部分組合可能超標")
+            st.caption("計算：√[max(|ΔL LCL|, |ΔL UCL|)² + max(|Δa LCL|, |Δa UCL|)² + max(|Δb LCL|, |Δb UCL|)²]。")
+            if not _iqr_guarantees_lab:
+                st.info("IQR 分別限制三個因子，不能單獨保證總 LAB ΔE* ≤ 0.50。模擬時將額外限制 LAB ΔE* ≤ 0.50，不修改 IQR 計算結果。")
+            st.caption(
+                f"歷史配對 {len(_risk_pairs)} 批；IQR 內 {int(_hist_iqr_mask.sum())} 批；"
+                f"IQR 內且 LAB ΔE* ≤ 0.50：{int(_hist_accepted.sum())} 批。"
+            )
 
-                if st.button("▶ 執行歷史風險模擬", key="task3_run_historical_sim", type="primary"):
-                    # Shared candidate LAB uniforms and historical Shift indices;
-                    # simulate only LAB inputs with Delta E* <= 0.50.
-                    _rng = np.random.default_rng(20261105)
-                    _draws = 10000
-                    # Common random numbers across candidate ranges: candidate LAB
-                    # vectors are uniformly sampled inside the candidate rectangle,
-                    # THEN rejected unless their combined LAB ΔE* <= 0.50.
-                    # The historical Shift vectors remain intact, including batches
-                    # whose LINE was NG (avoid optimistic survivorship bias).
-                    _pool_size = 120000
-                    _u = _rng.random((_pool_size, 3))
-                    _chosen_shift_indices_pool = _rng.integers(len(_shift_array), size=_pool_size)
-                    _candidate_rows = []
-                    _scenario_samples = {}
-                    _scenario_shift_indices = {}
-                    for _shrink in (0.00, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60):
-                        _new_low = _risk_lows + (_risk_highs - _risk_lows) * (_shrink / 2)
-                        _new_high = _risk_highs - (_risk_highs - _risk_lows) * (_shrink / 2)
-                        _pool_lab = _new_low + _u * (_new_high - _new_low)
-                        _lab_de_pool = np.linalg.norm(_pool_lab, axis=1)
-                        _valid_indices = np.flatnonzero(_lab_de_pool <= 0.50)
-                        # Resample after conditioning when needed. More stringent
-                        # conditions avoid reporting a risk estimate based on an
-                        # exceptionally tiny admissible LAB volume.
-                        _valid_fraction = len(_valid_indices) / _pool_size
-                        if len(_valid_indices) >= 1000:
-                            _pick = (_valid_indices[:_draws] if len(_valid_indices) >= _draws
-                                     else _rng.choice(_valid_indices, size=_draws, replace=True))
-                            _sim_lab = _pool_lab[_pick]
-                            _sim_shift = _shift_array[_chosen_shift_indices_pool[_pick]]
-                            _chosen_shift_indices = _chosen_shift_indices_pool[_pick]
-                            _sim_de = np.linalg.norm(_sim_lab + _sim_shift, axis=1)
-                            _sim_bad = _sim_de > _risk_spec  # at spec: PASS
-                            _risk_pct = float(_sim_bad.mean() * 100)
-                            _p95 = float(np.quantile(_sim_de, 0.95))
-                            _scenario_samples[_shrink] = _sim_de
-                            _scenario_shift_indices[_shrink] = _chosen_shift_indices
-                        else:
-                            _risk_pct, _p95 = np.nan, np.nan
-                            _scenario_samples[_shrink] = None
-                            _scenario_shift_indices[_shrink] = None
-                        _accepted_mask = (
-                            np.all((_lab_array >= _new_low) & (_lab_array <= _new_high), axis=1)
-                            & (np.linalg.norm(_lab_array, axis=1) <= 0.50)
-                        )
-                        _accepted_n = int(_accepted_mask.sum())
-                        _observed_bad_n = int(np.sum((_line_de > _risk_spec) & _accepted_mask))
-                        _candidate_rows.append({
-                            "縮減比例 (%)": round(_shrink * 100, 1),
-                            "模擬超標率 (%)": _risk_pct,
-                            "模擬 LINE ΔE* P95": _p95,
-                            "LAB ΔE*≤0.50 抽樣有效比例 (%)": _valid_fraction * 100,
-                            "LAB 歷史合格批數": _accepted_n,
-                            "LAB 歷史接受率 (%)": 100 * _accepted_n / len(_risk_data),
-                            "合格 LAB 中 LINE 實際超標批數": _observed_bad_n,
-                            "合格 LAB 中 LINE 實際超標率 (%)": (
-                                100 * _observed_bad_n / _accepted_n if _accepted_n else np.nan),
-                            **{f"{f} LCL": float(_new_low[i]) for i, f in enumerate(_factors_risk)},
-                            **{f"{f} UCL": float(_new_high[i]) for i, f in enumerate(_factors_risk)},
-                        })
-                    _scenarios_df = pd.DataFrame(_candidate_rows)
-                    # First feasible scenario = least narrowing among fixed scenarios.
-                    # Require observed LAB coverage to avoid proposals that accept
-                    # zero historical batches. Stronger validation requires new data.
-                    _eligible = _scenarios_df.loc[
-                        (_scenarios_df["模擬超標率 (%)"] <= _risk_target)
-                        & (_scenarios_df["LAB 歷史合格批數"] >= 1)
-                    ]
-                    _chosen_row = _eligible.iloc[0] if not _eligible.empty else None
-                    _chosen_shrink = float(_chosen_row["縮減比例 (%)"]) / 100 if _chosen_row is not None else None
-                    _summary_rows = []
-                    for _i, _f in enumerate(_factors_risk):
-                        _summary_rows.append({
-                            "色差因子": delta_label(_f),
-                            "現行 LCL": float(_risk_lows[_i]),
-                            "現行 UCL": float(_risk_highs[_i]),
-                            "候選 LCL": float(_chosen_row[f"{_f} LCL"]) if _chosen_row is not None else np.nan,
-                            "候選 UCL": float(_chosen_row[f"{_f} UCL"]) if _chosen_row is not None else np.nan,
-                            "計算公式": "新 LCL = 原 LCL + 原寬度×縮減比例/2；新 UCL = 原 UCL − 原寬度×縮減比例/2",
-                        })
-                    _main_table = pd.DataFrame(_summary_rows)
-                    _notes = pd.DataFrame([
-                        {"計算項目": "建界限資料篩選", "計算公式 / 說明": "每批 LAB ΔE* ≤ 0.50 且 LINE ΔE* ≤ 1.00，僅此配對批次供 IQR / Standard"},
-                        {"計算項目": "模擬 LAB 品質限制", "計算公式 / 說明": "抽樣 LAB 三項均在候選 LCL/UCL 內，且 SQRT(ΔL²+Δa²+Δb²) ≤ 0.50"},
-                        {"計算項目": "歷史 Shift", "計算公式 / 說明": "同一製造批號 LINE − LAB；ΔL、Δa、Δb 三項一起抽樣；包含 LINE NG 配對批次"},
-                        {"計算項目": "候選 LAB", "計算公式 / 說明": "新 LCL=原 LCL+原寬度×縮減比例/2；新 UCL=原 UCL−原寬度×縮減比例/2"},
-                        {"計算項目": "模擬 LINE", "計算公式 / 說明": "模擬 LINE = LAB ΔE*≤0.50 的候選範圍內均勻抽樣 LAB + 一筆完整歷史 Shift"},
-                        {"計算項目": "模擬 ΔE*", "計算公式 / 說明": "SQRT(LINE ΔL² + LINE Δa² + LINE Δb²)"},
-                        {"計算項目": "模擬超標率", "計算公式 / 說明": "100 × (模擬 ΔE* > 產出標準次數) / 10000"},
-                        {"計算項目": "P95", "計算公式 / 說明": "模擬 LINE ΔE* 第 95 百分位"},
-                        {"計算項目": "歷史 LAB 接受率", "計算公式 / 說明": "100 × 三項 LAB 同時在候選範圍內的配對批數 / 全部有效配對批數"},
-                        {"計算項目": "方法限制", "計算公式 / 說明": "均勻 LAB 與歷史 Shift 重抽樣屬假設情境；非實際超標機率、非製程安全保證"},
-                    ])
-                    _base_samples = _scenario_samples[0.0]
-                    _candidate_samples = (_scenario_samples[_chosen_shrink]
-                                          if _chosen_shrink is not None else None)
-                    _samples_export = pd.DataFrame({
-                        "模擬編號": np.arange(1, _draws + 1),
-                        "抽樣 Shift 批次索引 (1-based)": (
-                            _scenario_shift_indices[0.0] + 1
-                            if _scenario_shift_indices[0.0] is not None
-                            else np.full(_draws, np.nan)),
-                        "模擬 ΔE* (現行)": (_base_samples if _base_samples is not None
-                                               else np.full(_draws, np.nan)),
-                        "模擬 ΔE* (候選)": (_candidate_samples if _candidate_samples is not None
-                                               else np.full(_draws, np.nan)),
+            st.markdown("### ② LAB 合格後，模擬 LINE ΔE* 是否 ≤ 1.00？")
+            _risk_goal = st.selectbox("模擬 LINE 超標率參考門檻", (5.0, 1.0, 10.0),
+                                       key="task3_iqr_post_goal", format_func=lambda x: f"{fmt_num_trim(x)}%")
+            st.caption("假設在 IQR 盒內均勻抽取 LAB，僅保留 LAB ΔE* ≤ 0.50 的樣本；再抽取完整歷史三因子 Shift，計算 LINE ΔE*。只用 LINE ΔE* > 1.00 判定超標。")
+
+            import hashlib as _post_hashlib
+            _post_sig = _post_hashlib.sha256(
+                _risk_pairs[_risk_pair_cols].to_numpy(dtype="<f8").tobytes()
+                + _lo.astype("<f8").tobytes() + _hi.astype("<f8").tobytes()
+                + np.array([_risk_goal], dtype="<f8").tobytes()
+                + str(color).encode("utf-8")
+            ).hexdigest()
+            _post_state = st.session_state.get("task3_iqr_post_validation")
+            if _post_state is not None and _post_state.get("signature") != _post_sig:
+                st.session_state.pop("task3_iqr_post_validation", None)
+                _post_state = None
+
+            if st.button("▶ 計算 IQR–LAB–LINE 風險", type="primary", key="task3_iqr_post_run"):
+                _rng = np.random.default_rng(20261105)
+                _n_sim = 10000
+                _shift_draw_idx = _rng.integers(0, len(_hist_shift), size=_n_sim)
+                _shift_draw = _hist_shift[_shift_draw_idx]
+                _scenario_rows = []
+                _scenario_samples = {}
+                _scenario_labs = {}
+                # Fixed narrowing levels; not an optimization or proven safe window.
+                for _shrink in (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6):
+                    _new_lo = _lo + (_hi - _lo) * _shrink / 2
+                    _new_hi = _hi - (_hi - _lo) * _shrink / 2
+                    _full_box_de = float(np.linalg.norm(np.maximum(np.abs(_new_lo), np.abs(_new_hi))))
+                    # Rejection sampling gives a uniform distribution on the
+                    # LAB box intersected with the LAB Delta E <= 0.50 sphere.
+                    # Never simulate LAB with Delta E > 0.50.
+                    _valid_parts = []
+                    _collected = 0
+                    _tested = 0
+                    while _collected < _n_sim and _tested < 500000:
+                        _batch_n = min(20000, 500000 - _tested)
+                        _proposed_lab = _rng.uniform(_new_lo, _new_hi, size=(_batch_n, 3))
+                        _good = _proposed_lab[np.linalg.norm(_proposed_lab, axis=1) <= _lab_limit]
+                        _tested += _batch_n
+                        if len(_good):
+                            _grab = _good[:_n_sim - _collected]
+                            _valid_parts.append(_grab)
+                            _collected += len(_grab)
+                    _sampled_lab = (np.vstack(_valid_parts) if _valid_parts
+                                    else np.empty((0, 3), dtype=float))
+                    # Exact 10k simulated cases only when enough valid samples are drawn.
+                    _has_sim = len(_sampled_lab) == _n_sim
+                    _sim_de = (np.linalg.norm(_sampled_lab + _shift_draw, axis=1)
+                               if _has_sim else np.array([], dtype=float))
+                    _hist_mask = (np.all((_lab_hist >= _new_lo) & (_lab_hist <= _new_hi), axis=1)
+                                  & _hist_lab_pass)
+                    _hist_n = int(_hist_mask.sum())
+                    _hist_ng = int(np.sum(_hist_mask & ~_hist_line_pass))
+                    _scenario_rows.append({
+                        "縮減比例 (%)": _shrink * 100,
+                        "LAB 盒範圍最大 ΔE*": _full_box_de,
+                        "LAB 全盒符合 ≤0.50": "是" if _full_box_de <= _lab_limit else "否，需另檢查總 ΔE*",
+                        "模擬次數": len(_sim_de),
+                        "LINE 模擬超標率 (%)": float(np.mean(_sim_de > _line_limit) * 100) if _has_sim else np.nan,
+                        "LINE 模擬 P95": float(np.quantile(_sim_de, 0.95)) if _has_sim else np.nan,
+                        "LAB 歷史可接受批數": _hist_n,
+                        "LAB 歷史接受率 (%)": 100 * _hist_n / len(_risk_pairs),
+                        "接受批次 LINE 實際超標數": _hist_ng,
+                        **{f"{f} LCL": _new_lo[ix] for ix, f in enumerate(_risk_factors)},
+                        **{f"{f} UCL": _new_hi[ix] for ix, f in enumerate(_risk_factors)},
                     })
-                    _safe_sim_color = re.sub(r"[^A-Za-z0-9_-]", "_", str(color)) or "Color"
-                    _risk_export = io.BytesIO()
-                    with pd.ExcelWriter(_risk_export, engine="openpyxl") as _writer:
-                        _main_table.to_excel(_writer, sheet_name="LAB_Limits", index=False)
-                        _scenarios_df.to_excel(_writer, sheet_name="Risk_Scenarios", index=False)
-                        _risk_data[["製造批號", "Time", *_paired_cols,
-                                    *(f"Shift_{f}" for f in _factors_risk), "LINE ΔE* (CIE76)"]].to_excel(
-                                        _writer, sheet_name="Paired_Batches", index=False)
-                        _samples_export.to_excel(_writer, sheet_name="Simulation_10000", index=False)
-                        _notes.to_excel(_writer, sheet_name="Formulas_Notes", index=False)
-                        for _ws in _writer.book.worksheets:
-                            _ws.freeze_panes = "A2"
-                            _ws.auto_filter.ref = _ws.dimensions
-                            # Display at most two decimals while preserving raw numeric precision.
-                            for _excel_row in _ws.iter_rows(min_row=2):
-                                for _excel_cell in _excel_row:
-                                    if isinstance(_excel_cell.value, (float, np.floating)):
-                                        _excel_cell.number_format = '0.##;[Red]-0.##;0'
-                            from openpyxl.utils import get_column_letter as _get_col_letter
-                            for _cell in _ws[1]:
-                                _ws.column_dimensions[_get_col_letter(_cell.column)].width = min(
-                                    max(len(str(_cell.value or "")) + 3, 16), 48)
-                    st.session_state["task3_historical_sim_result"] = {
-                        "signature": _risk_signature,
-                        "scenarios": _scenarios_df,
-                        "limits": _main_table,
-                        "chosen_shrink": _chosen_shrink,
-                        "samples_current": _scenario_samples[0.0],
-                        "samples_chosen": (_scenario_samples[_chosen_shrink] if _chosen_shrink is not None else None),
-                        "excel": _risk_export.getvalue(),
-                        "filename": f"{_safe_sim_color}_Historical_LAB_LINE_Risk.xlsx",
-                        "n": len(_risk_data),
-                        "risk_spec": float(_risk_spec),
+                    _scenario_samples[_shrink] = _sim_de
+                    _scenario_labs[_shrink] = _sampled_lab
+                _scenario_df = pd.DataFrame(_scenario_rows)
+                _eligible = _scenario_df.loc[
+                    _scenario_df["LAB 全盒符合 ≤0.50"].eq("是")
+                    & _scenario_df["LINE 模擬超標率 (%)"].le(_risk_goal)
+                    & _scenario_df["LAB 歷史可接受批數"].ge(1)
+                    & _scenario_df["模擬次數"].eq(_n_sim)
+                ]
+                _candidate = _eligible.iloc[0] if not _eligible.empty else None
+                _candidate_shrink = (float(_candidate["縮減比例 (%)"]) / 100
+                                     if _candidate is not None else None)
+                _export_limits = pd.DataFrame([
+                    {
+                        "色差因子": f + "*",
+                        "IQR LCL": float(_lo[ix]), "IQR UCL": float(_hi[ix]),
+                        "候選 LCL": float(_candidate[f"{f} LCL"]) if _candidate is not None else np.nan,
+                        "候選 UCL": float(_candidate[f"{f} UCL"]) if _candidate is not None else np.nan,
+                        "計算公式": "候選 LCL=IQR LCL + (IQR UCL-IQR LCL)×縮減比例/2；候選 UCL=IQR UCL−(IQR UCL-IQR LCL)×縮減比例/2",
                     }
-                    _stored_risk = st.session_state["task3_historical_sim_result"]
+                    for ix, f in enumerate(_risk_factors)
+                ])
+                _detail_sim = pd.DataFrame({
+                    "模擬編號": np.arange(1, _n_sim + 1),
+                    "歷史 Shift 批次索引": _shift_draw_idx + 1,
+                    "現行 LINE ΔE*": _scenario_samples[0.0] if len(_scenario_samples[0.0]) == _n_sim else np.full(_n_sim, np.nan),
+                    "候選 LINE ΔE*": (_scenario_samples[_candidate_shrink]
+                                        if _candidate_shrink is not None else np.full(_n_sim, np.nan)),
+                })
+                _details_paired = _risk_pairs[["製造批號", "Time", *_risk_pair_cols, "LAB ΔE*", "LINE ΔE*",
+                                               *(f"Shift_{f}" for f in _risk_factors)]].copy()
+                _notes = pd.DataFrame([
+                    ("IQR 計算", "維持原 Task 3 計算方式不變，直接引用已計算 IQR LCL/UCL"),
+                    ("IQR 全區間 LAB 最大 ΔE*", "SQRT(SUM(MAX(ABS(LCL),ABS(UCL))^2))；超過 0.50 表示 IQR 盒含不合格組合"),
+                    ("LAB 模擬有效條件", "LAB 三項均在所選範圍內且 SQRT(ΔL²+Δa²+Δb²) ≤ 0.50"),
+                    ("歷史 Shift", "同批 LINE − LAB；完整抽取 ΔL、Δa、Δb 三因子向量"),
+                    ("LINE 預測", "LINE = 模擬 LAB + 歷史 Shift；LINE 合否只依總 ΔE* ≤ 1.00"),
+                    ("LINE 模擬超標率", "100 × N(LINE ΔE* > 1.00) / 10000"),
+                    ("LAB 歷史接受率", "100 × N(三個 LAB 因子落於區間且 LAB ΔE* ≤ 0.50) / 全部有效配對批數"),
+                    ("模型限制", "條件均勻分布的 LAB 與歷史 Shift 抽樣；模擬超標率不是實際製程超標機率，少量配對批次僅供初步研究"),
+                ], columns=["項目", "公式與說明"])
+                _buf = io.BytesIO()
+                with pd.ExcelWriter(_buf, engine="openpyxl") as _writer:
+                    _export_limits.to_excel(_writer, sheet_name="IQR_LAB_Limits", index=False)
+                    _scenario_df.to_excel(_writer, sheet_name="Risk_Scenarios", index=False)
+                    _details_paired.to_excel(_writer, sheet_name="Historical_Pairs", index=False)
+                    _detail_sim.to_excel(_writer, sheet_name="Simulation", index=False)
+                    _notes.to_excel(_writer, sheet_name="Formulas", index=False)
+                    for _ws in _writer.book.worksheets:
+                        _ws.freeze_panes = "A2"
+                        _ws.auto_filter.ref = _ws.dimensions
+                        from openpyxl.utils import get_column_letter as _col_letter
+                        for _h in _ws[1]:
+                            _ws.column_dimensions[_col_letter(_h.column)].width = min(
+                                max(16, len(str(_h.value or "")) + 4), 48)
+                        for _row in _ws.iter_rows(min_row=2):
+                            for _cell in _row:
+                                if isinstance(_cell.value, (int, float)) and not isinstance(_cell.value, bool):
+                                    _cell.number_format = "0.##"
+                _post_state = {
+                    "signature": _post_sig,
+                    "scenarios": _scenario_df,
+                    "selected": _candidate_shrink,
+                    "samples_current": _scenario_samples[0.0],
+                    "samples_candidate": (_scenario_samples[_candidate_shrink]
+                                          if _candidate_shrink is not None else None),
+                    "file": _buf.getvalue(),
+                    "filename": f"{re.sub(r'[^A-Za-z0-9_-]', '_', str(color))}_IQR_LAB_LINE_Risk.xlsx",
+                }
+                st.session_state["task3_iqr_post_validation"] = _post_state
 
-                if _stored_risk is not None:
-                    _result_scenarios = _stored_risk["scenarios"]
-                    _baseline = _result_scenarios.iloc[0]
-                    _selected_shrink = _stored_risk["chosen_shrink"]
-                    _selected = (_result_scenarios.loc[
-                        np.isclose(_result_scenarios["縮減比例 (%)"], _selected_shrink * 100)
-                    ].iloc[0] if _selected_shrink is not None else None)
-
-                    _m1, _m2, _m3 = st.columns(3)
-                    _m1.metric("現行模擬超標率", fmt_percent_trim(_baseline["模擬超標率 (%)"]))
-                    _m2.metric("候選模擬超標率", fmt_percent_trim(_selected["模擬超標率 (%)"]) if _selected is not None else "未找到")
-                    _m3.metric("有效歷史配對批數", f"{_stored_risk['n']}")
-
-                    st.markdown("### ① 現行與候選 LAB 入料範圍")
-                    _present_limits = _stored_risk["limits"].copy()
-                    _present_limits["現行 LAB 範圍"] = _present_limits.apply(
-                        lambda _r: f"{fmt_num_trim(_r['現行 LCL'])} ~ {fmt_num_trim(_r['現行 UCL'])}", axis=1)
-                    _present_limits["候選 LAB 範圍"] = _present_limits.apply(
-                        lambda _r: (f"{fmt_num_trim(_r['候選 LCL'])} ~ {fmt_num_trim(_r['候選 UCL'])}"
-                                    if np.isfinite(_r['候選 LCL']) else "未建立"), axis=1)
-                    st.dataframe(_present_limits[["色差因子", "現行 LAB 範圍", "候選 LAB 範圍"]],
-                                 use_container_width=True, hide_index=True)
-                    if _selected is None:
-                        st.warning("以目前歷史 Shift 和指定模擬門檻，未找到符合條件且保留至少一筆歷史 LAB 批次的候選範圍。請補充資料，勿直接變更入料界限。")
-                    else:
-                        st.caption(
-                            f"候選方案：原範圍兩側合計縮減 {fmt_num_trim(_selected['縮減比例 (%)'])}%；"
-                            "這是固定情境逐一比較的初步方案，非數學最佳解。"
-                        )
-                    st.markdown("### ② 模擬風險與歷史接受率比較")
-                    _compare = pd.DataFrame([
-                        {
-                            "評估指標": "模擬 LINE ΔE* 超標率 (%)",
-                            "現行界限": fmt_percent_trim(_baseline["模擬超標率 (%)"]),
-                            "候選範圍": fmt_percent_trim(_selected["模擬超標率 (%)"]) if _selected is not None else "—",
-                        },
-                        {
-                            "評估指標": "LINE ΔE* P95",
-                            "現行界限": fmt_num_trim(_baseline["模擬 LINE ΔE* P95"]),
-                            "候選範圍": fmt_num_trim(_selected["模擬 LINE ΔE* P95"]) if _selected is not None else "—",
-                        },
-                        {
-                            "評估指標": "LAB 歷史接受率 (%)",
-                            "現行界限": fmt_percent_trim(_baseline["LAB 歷史接受率 (%)"]),
-                            "候選範圍": fmt_percent_trim(_selected["LAB 歷史接受率 (%)"]) if _selected is not None else "—",
-                        },
-                        {
-                            "評估指標": "LAB 歷史合格批數",
-                            "現行界限": fmt_num_trim(_baseline["LAB 歷史合格批數"]),
-                            "候選範圍": fmt_num_trim(_selected["LAB 歷史合格批數"]) if _selected is not None else "—",
-                        },
-                    ])
-                    st.dataframe(_compare, use_container_width=True, hide_index=True)
-                    if _stored_risk["n"] < 30:
-                        st.warning(
-                            f"⚠️ 有效配對資料僅 {fmt_num_trim(_stored_risk['n'])} 批。模擬 10,000 次不能增加歷史樣本數；"
-                            "結果對歷史 Shift 與均勻分布假設敏感，候選範圍僅供探索，不得直接視為安全界限。"
-                        )
-                    else:
-                        st.info("模擬結果仍須以新增生產批次獨立驗證，才能評估是否適用於現場管制。")
-                    st.markdown("### ③ LINE ΔE* 模擬分布")
-                    if _stored_risk["samples_current"] is None:
-                        st.warning("現行 LAB 界限與 ΔE* ≤ 0.50 的交集過小，未取得足夠有效模擬樣本；請增加歷史數據或檢查界限。")
-                    else:
-                        # Use a shared set of bins and side-by-side bars.  Avoid
-                        # translucent overlapping histograms that hide differences.
-                        _hist_cur = np.asarray(
-                            _stored_risk["samples_current"] if _stored_risk["samples_current"] is not None else [],
-                            dtype=float)
-                        _hist_candidate_raw = _stored_risk["samples_chosen"]
-                        _hist_cand = (np.asarray(_hist_candidate_raw, dtype=float)
-                                      if _hist_candidate_raw is not None else None)
-                        _spec_line = float(_stored_risk.get("risk_spec", _risk_spec))
-                        _combined = (_hist_cur if _hist_cand is None
-                                     else np.concatenate((_hist_cur, _hist_cand)))
-                        _combined = _combined[np.isfinite(_combined)]
-                        _hist_edges = np.histogram_bin_edges(_combined, bins=24)
-                        _hist_centers = (_hist_edges[:-1] + _hist_edges[1:]) / 2
-                        _hist_widths = np.diff(_hist_edges)
-                        _fig_sim, _ax_sim = plt.subplots(figsize=(10, 4.5))
-                        _fig_sim.patch.set_facecolor("white")
-                        _ax_sim.set_facecolor("white")
-                        _cur_counts, _ = np.histogram(_hist_cur, bins=_hist_edges)
-                        if _hist_cand is not None:
-                            _cand_counts, _ = np.histogram(_hist_cand, bins=_hist_edges)
-                            _ax_sim.bar(_hist_centers - _hist_widths * 0.21, _cur_counts,
-                                        width=_hist_widths * 0.40, color="#467FA7",
-                                        edgecolor="white", linewidth=0.6,
-                                        label="Current LAB range", zorder=3)
-                            _ax_sim.bar(_hist_centers + _hist_widths * 0.21, _cand_counts,
-                                        width=_hist_widths * 0.40, color="#E5A16B",
-                                        edgecolor="white", linewidth=0.6,
-                                        label="Candidate LAB range", zorder=3)
-                        else:
-                            _ax_sim.bar(_hist_centers, _cur_counts,
-                                        width=_hist_widths * 0.86, color="#467FA7",
-                                        edgecolor="white", linewidth=0.6,
-                                        label="Current LAB range", zorder=3)
-                        _ax_sim.axvline(_spec_line, linestyle="--", color="#B33A37",
-                                        linewidth=2, label=f"LINE ΔE* limit = {fmt_num_trim(_spec_line)}",
-                                        zorder=4)
-                        _ax_sim.set_xlabel("Simulated LINE ΔE* (CIE76)", fontsize=11)
-                        _ax_sim.set_ylabel("Simulation count", fontsize=11)
-                        _ax_sim.set_xlim(left=max(0, _hist_edges[0] - _hist_widths[0] / 2),
-                                         right=max(_hist_edges[-1] + _hist_widths[-1] / 2,
-                                                   _spec_line + _hist_widths[-1]))
-                        _ax_sim.set_ylim(bottom=0)
-                        _ax_sim.grid(axis="y", color="#DFE5EB", linewidth=0.7)
-                        _ax_sim.set_axisbelow(True)
-                        _ax_sim.spines["top"].set_visible(False)
-                        _ax_sim.spines["right"].set_visible(False)
-                        _ax_sim.legend(loc="upper right", frameon=False, fontsize=9)
-                        _fig_sim.tight_layout()
-                        st.pyplot(_fig_sim, use_container_width=True)
-                        plt.close(_fig_sim)
-                        st.caption(
-                            "每組柱狀圖代表相同的 ΔE* 區間；藍色為現行 LAB 範圍，橘色為候選範圍。"
-                            "紅色虛線為產出規格上限；右側柱狀圖越少，代表模擬超標情境越少。"
-                        )
-
-                    with st.expander("📋 查看計算公式、情境明細與歷史 Shift", expanded=False):
-                        st.caption(
-                            "Shift = LINE − LAB（逐批完整三因子）；模擬 LINE = 抽樣 LAB + 一筆完整歷史 Shift；"
-                            "ΔE* = √(LINE ΔL² + LINE Δa² + LINE Δb²)；"
-                            "模擬超標率 = ΔE* > 標準的次數 / 10,000 × 100%。"
-                        )
-                        _scenario_show = _result_scenarios.copy()
-                        for _col in ["縮減比例 (%)", "模擬超標率 (%)", "模擬 LINE ΔE* P95", "LAB 歷史接受率 (%)",
-                                     "合格 LAB 中 LINE 實際超標率 (%)", "ΔL LCL", "ΔL UCL", "Δa LCL", "Δa UCL", "Δb LCL", "Δb UCL"]:
-                            if _col in _scenario_show.columns:
-                                if "%" in _col:
-                                    _scenario_show[_col] = _scenario_show[_col].map(fmt_percent_trim)
-                                else:
-                                    _scenario_show[_col] = _scenario_show[_col].map(fmt_num_trim)
-                        for _col in ["LAB 歷史合格批數", "合格 LAB 中 LINE 實際超標批數"]:
-                            if _col in _scenario_show.columns:
-                                _scenario_show[_col] = _scenario_show[_col].map(fmt_num_trim)
-                        st.dataframe(_scenario_show, use_container_width=True, hide_index=True)
-                        _risk_display = _risk_data[["製造批號", "Time", *_paired_cols,
-                                                    *(f"Shift_{f}" for f in _factors_risk), "LINE ΔE* (CIE76)"]].copy()
-                        _numeric_cols = [c for c in _risk_display.columns if c not in ["製造批號", "Time"]]
-                        for _col in _numeric_cols:
-                            _risk_display[_col] = _risk_display[_col].map(fmt_num_trim)
-                        st.dataframe(_risk_display, use_container_width=True, hide_index=True)
-                    st.download_button(
-                        "📥 下載歷史風險模擬與計算明細 (Excel)",
-                        data=_stored_risk["excel"], file_name=_stored_risk["filename"],
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key="task3_sim_excel_download",
-                    )
+            if _post_state is not None:
+                _scenario_df = _post_state["scenarios"]
+                _base = _scenario_df.iloc[0]
+                _selected_shrink = _post_state["selected"]
+                _chosen = (_scenario_df.loc[np.isclose(_scenario_df["縮減比例 (%)"], 100 * _selected_shrink)].iloc[0]
+                           if _selected_shrink is not None else None)
+                if not np.isfinite(_base["LINE 模擬超標率 (%)"]):
+                    st.error("原 IQR 範圍與 LAB ΔE* ≤ 0.50 的交集過小，本次抽樣未能取得足夠有效資料。")
                 else:
-                    st.info("按「執行歷史風險模擬」後，顯示現行風險、候選入料範圍與完整計算明細。")
+                    _c1, _c2, _c3 = st.columns(3)
+                    _c1.metric("現行 IQR：LINE 模擬超標率", fmt_percent_trim(_base["LINE 模擬超標率 (%)"]))
+                    _c2.metric("候選 LAB：LINE 模擬超標率", fmt_percent_trim(_chosen["LINE 模擬超標率 (%)"]) if _chosen is not None else "未建立")
+                    _c3.metric("有效配對批數", fmt_num_trim(len(_risk_pairs)))
+                    st.markdown("### ③ IQR 與候選範圍比較")
+                    _compare_limits = pd.DataFrame([
+                        {
+                            "色差因子": f + "*",
+                            "IQR LAB 範圍": f"{fmt_num_trim(_lo[ix])} ~ {fmt_num_trim(_hi[ix])}",
+                            "候選 LAB 範圍": (f"{fmt_num_trim(_chosen[f'{f} LCL'])} ~ {fmt_num_trim(_chosen[f'{f} UCL'])}"
+                                             if _chosen is not None else "未建立"),
+                        }
+                        for ix, f in enumerate(_risk_factors)
+                    ])
+                    st.dataframe(_compare_limits, hide_index=True, use_container_width=True)
+                    if _chosen is None:
+                        st.warning("目前試算範圍沒有同時滿足：全 LAB 界限 ΔE* ≤ 0.50、模擬 LINE 超標率門檻及至少 1 筆歷史接受批次；未建立建議範圍。")
+                    elif _selected_shrink == 0:
+                        st.success("現行 IQR 已符合本次設定的 LAB 與模擬 LINE 風險條件，無須在本情境下再縮減。")
+                    else:
+                        st.info(f"初步候選：三項 IQR 區間兩側合計縮減 {fmt_percent_trim(100 * _selected_shrink)}。此為固定比例情境比較，尚未經產線驗證。")
+                    _comparison = pd.DataFrame([
+                        {"評估項目": "LAB 全盒最大 ΔE*", "現行 IQR": fmt_num_trim(_base["LAB 盒範圍最大 ΔE*"]),
+                         "候選 LAB": fmt_num_trim(_chosen["LAB 盒範圍最大 ΔE*"]) if _chosen is not None else "—"},
+                        {"評估項目": "LINE 模擬超標率", "現行 IQR": fmt_percent_trim(_base["LINE 模擬超標率 (%)"]),
+                         "候選 LAB": fmt_percent_trim(_chosen["LINE 模擬超標率 (%)"]) if _chosen is not None else "—"},
+                        {"評估項目": "LINE 模擬 P95", "現行 IQR": fmt_num_trim(_base["LINE 模擬 P95"]),
+                         "候選 LAB": fmt_num_trim(_chosen["LINE 模擬 P95"]) if _chosen is not None else "—"},
+                        {"評估項目": "LAB 歷史接受率", "現行 IQR": fmt_percent_trim(_base["LAB 歷史接受率 (%)"]),
+                         "候選 LAB": fmt_percent_trim(_chosen["LAB 歷史接受率 (%)"]) if _chosen is not None else "—"},
+                    ])
+                    st.dataframe(_comparison, hide_index=True, use_container_width=True)
+                    st.markdown("### LINE ΔE* 模擬分布（Histogram）")
+                    _v0 = _post_state["samples_current"]
+                    _v1 = _post_state["samples_candidate"]
+                    _v0 = np.asarray(_v0, dtype=float)
+                    _v1 = np.asarray(_v1, dtype=float) if _v1 is not None else None
+                    _plot_values = _v0 if _v1 is None else np.r_[_v0, _v1]
+                    _edges = np.histogram_bin_edges(_plot_values, bins=22)
+                    _centers = (_edges[1:] + _edges[:-1]) / 2
+                    _widths = np.diff(_edges)
+                    _fig, _ax = plt.subplots(figsize=(10, 4))
+                    _fig.patch.set_facecolor("white")
+                    _ax.set_facecolor("white")
+                    _counts0, _ = np.histogram(_v0, bins=_edges)
+                    if _v1 is not None:
+                        _counts1, _ = np.histogram(_v1, bins=_edges)
+                        _ax.bar(_centers - _widths * 0.21, _counts0, _widths * 0.4,
+                                color="#467FA7", edgecolor="white", linewidth=0.4,
+                                label="IQR LAB", zorder=3)
+                        _ax.bar(_centers + _widths * 0.21, _counts1, _widths * 0.4,
+                                color="#E4A16B", edgecolor="white", linewidth=0.4,
+                                label="Candidate LAB", zorder=3)
+                    else:
+                        _ax.bar(_centers, _counts0, _widths * 0.86, color="#467FA7",
+                                edgecolor="white", linewidth=0.4, label="IQR LAB", zorder=3)
+                    _ax.axvline(_line_limit, color="#B23B3B", linewidth=2,
+                                linestyle="--", label="LINE Delta E = 1.00")
+                    _ax.set_xlabel("Simulated LINE Delta E (CIE76)")
+                    _ax.set_ylabel("Number of simulated cases")
+                    _ax.set_xlim(left=max(0, _edges[0] - _widths[0]), right=max(_line_limit + 0.05, _edges[-1] + _widths[-1]))
+                    _ax.set_ylim(bottom=0)
+                    _ax.grid(axis="y", alpha=0.2)
+                    _ax.set_axisbelow(True)
+                    _ax.spines["top"].set_visible(False)
+                    _ax.spines["right"].set_visible(False)
+                    _ax.legend(frameon=False)
+                    _fig.tight_layout()
+                    st.pyplot(_fig, use_container_width=True)
+                    plt.close(_fig)
+                if len(_risk_pairs) < 30:
+                    st.warning(f"歷史完整配對僅 {len(_risk_pairs)} 批。10,000 次模擬不能補足歷史樣本不足，請勿將結果直接視為安全保證。")
+                with st.expander("📋 查看歷史資料、計算公式與候選情境", expanded=False):
+                    _display = _scenario_df.copy()
+                    for _col in _display.select_dtypes(include=[np.number]).columns:
+                        _display[_col] = _display[_col].map(fmt_num_trim)
+                    st.dataframe(_display, hide_index=True, use_container_width=True)
+                    _history_display = _risk_pairs[["製造批號", "Time", *_risk_pair_cols, "LAB ΔE*", "LINE ΔE*",
+                                                    *(f"Shift_{f}" for f in _risk_factors)]].copy()
+                    for _c in _history_display.select_dtypes(include=[np.number]).columns:
+                        _history_display[_c] = _history_display[_c].map(fmt_num_trim)
+                    st.dataframe(_history_display, hide_index=True, use_container_width=True)
+                st.download_button("📥 下載 IQR／LAB／LINE 驗證明細 (Excel)",
+                                   data=_post_state["file"], file_name=_post_state["filename"],
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   key="task3_iqr_post_excel")
+            else:
+                st.info("請按「計算 IQR–LAB–LINE 風險」，將依已計算 IQR 界限進行 LAB 與 LINE 驗證。")
 
     # ---------------------------------------------------------
     # Task 3 Word Report Export
@@ -2300,7 +2177,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 "Determine a practical incoming LAB control range for ΔL*, Δa* and Δb*, and use the paired "
                 "LINE output from the same production batches to evaluate the downstream color trend. "
                 "The recommended LAB range is derived from the overlap between the Standard (Mean ± Kσ) "
-                "and IQR methods using LAB data with both LAB ΔE* ≤ 0.50 and LINE ΔE* ≤ 1.00; "
+                "and IQR methods using LAB data associated with acceptable LINE output whenever current "
                 "LINE control limits are available."
             )
 
