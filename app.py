@@ -111,6 +111,34 @@ def read_uploaded_table(file_bytes, file_name):
 
     raise ValueError("Unsupported file format. Please upload CSV, XLSX, or XLS.")
 
+
+def fmt_num_trim(value, digits=2):
+    """Format numeric values with up to 2 decimals; drop trailing zeros and decimal point."""
+    if value is None:
+        return "—"
+    try:
+        if pd.isna(value):
+            return "—"
+    except Exception:
+        pass
+    try:
+        num = float(value)
+    except Exception:
+        return value
+    if abs(num) < 10 ** (-(digits + 1)):
+        num = 0.0
+    rounded_int = round(num)
+    if abs(num - rounded_int) < 10 ** (-(digits + 1)):
+        return f"{int(rounded_int)}"
+    out = f"{num:.{digits}f}".rstrip("0").rstrip(".")
+    return "0" if out in ("-0", "-0.0") else out
+
+
+def fmt_percent_trim(value, digits=2):
+    base = fmt_num_trim(value, digits=digits)
+    return base if base == "—" else f"{base}%"
+
+
 # Stop here until both files have been uploaded.
 if uploaded_data_file is None or uploaded_limit_file is None:
     st.title("📊 SPC Color Dashboard")
@@ -1978,6 +2006,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
                         "excel": _risk_export.getvalue(),
                         "filename": f"{_safe_sim_color}_Historical_LAB_LINE_Risk.xlsx",
                         "n": len(_risk_data),
+                        "risk_spec": float(_risk_spec),
                     }
                     _stored_risk = st.session_state["task3_historical_sim_result"]
 
@@ -1997,9 +2026,9 @@ elif app_mode == "🎛️ Control Limit Calculator":
                     st.markdown("### ① 現行與候選 LAB 入料範圍")
                     _present_limits = _stored_risk["limits"].copy()
                     _present_limits["現行 LAB 範圍"] = _present_limits.apply(
-                        lambda _r: f"{_r['現行 LCL']:.4f} ~ {_r['現行 UCL']:.4f}", axis=1)
+                        lambda _r: f"{fmt_num_trim(_r['現行 LCL'])} ~ {fmt_num_trim(_r['現行 UCL'])}", axis=1)
                     _present_limits["候選 LAB 範圍"] = _present_limits.apply(
-                        lambda _r: (f"{_r['候選 LCL']:.4f} ~ {_r['候選 UCL']:.4f}"
+                        lambda _r: (f"{fmt_num_trim(_r['候選 LCL'])} ~ {fmt_num_trim(_r['候選 UCL'])}"
                                     if np.isfinite(_r['候選 LCL']) else "未建立"), axis=1)
                     st.dataframe(_present_limits[["色差因子", "現行 LAB 範圍", "候選 LAB 範圍"]],
                                  use_container_width=True, hide_index=True)
@@ -2007,70 +2036,85 @@ elif app_mode == "🎛️ Control Limit Calculator":
                         st.warning("以目前歷史 Shift 和指定模擬門檻，未找到符合條件且保留至少一筆歷史 LAB 批次的候選範圍。請補充資料，勿直接變更入料界限。")
                     else:
                         st.caption(
-                            f"候選方案：原範圍兩側合計縮減 {_selected['縮減比例 (%)']:.0f}%；"
+                            f"候選方案：原範圍兩側合計縮減 {fmt_num_trim(_selected['縮減比例 (%)'])}%；"
                             "這是固定情境逐一比較的初步方案，非數學最佳解。"
                         )
                     st.markdown("### ② 模擬風險與歷史接受率比較")
                     _compare = pd.DataFrame([
                         {
                             "評估指標": "模擬 LINE ΔE* 超標率 (%)",
-                            "現行界限": _baseline["模擬超標率 (%)"],
-                            "候選範圍": _selected["模擬超標率 (%)"] if _selected is not None else np.nan,
+                            "現行界限": fmt_percent_trim(_baseline["模擬超標率 (%)"]),
+                            "候選範圍": fmt_percent_trim(_selected["模擬超標率 (%)"]) if _selected is not None else "—",
                         },
                         {
                             "評估指標": "LINE ΔE* P95",
-                            "現行界限": _baseline["模擬 LINE ΔE* P95"],
-                            "候選範圍": _selected["模擬 LINE ΔE* P95"] if _selected is not None else np.nan,
+                            "現行界限": fmt_num_trim(_baseline["模擬 LINE ΔE* P95"]),
+                            "候選範圍": fmt_num_trim(_selected["模擬 LINE ΔE* P95"]) if _selected is not None else "—",
                         },
                         {
                             "評估指標": "LAB 歷史接受率 (%)",
-                            "現行界限": _baseline["LAB 歷史接受率 (%)"],
-                            "候選範圍": _selected["LAB 歷史接受率 (%)"] if _selected is not None else np.nan,
+                            "現行界限": fmt_percent_trim(_baseline["LAB 歷史接受率 (%)"]),
+                            "候選範圍": fmt_percent_trim(_selected["LAB 歷史接受率 (%)"]) if _selected is not None else "—",
                         },
                         {
                             "評估指標": "LAB 歷史合格批數",
-                            "現行界限": _baseline["LAB 歷史合格批數"],
-                            "候選範圍": _selected["LAB 歷史合格批數"] if _selected is not None else np.nan,
+                            "現行界限": fmt_num_trim(_baseline["LAB 歷史合格批數"]),
+                            "候選範圍": fmt_num_trim(_selected["LAB 歷史合格批數"]) if _selected is not None else "—",
                         },
                     ])
-                    st.dataframe(_compare.style.format({"現行界限": "{:.2f}", "候選範圍": "{:.2f}"}, na_rep="—"),
-                                 use_container_width=True, hide_index=True)
+                    st.dataframe(_compare, use_container_width=True, hide_index=True)
                     if _stored_risk["n"] < 30:
                         st.warning(
-                            f"⚠️ 有效配對資料僅 {_stored_risk['n']} 批。模擬 10,000 次不能增加歷史樣本數；"
+                            f"⚠️ 有效配對資料僅 {fmt_num_trim(_stored_risk['n'])} 批。模擬 10,000 次不能增加歷史樣本數；"
                             "結果對歷史 Shift 與均勻分布假設敏感，候選範圍僅供探索，不得直接視為安全界限。"
                         )
                     else:
                         st.info("模擬結果仍須以新增生產批次獨立驗證，才能評估是否適用於現場管制。")
                     st.markdown("### ③ LINE ΔE* 模擬分布")
-                    _fig_sim, _ax_sim = plt.subplots(figsize=(9.5, 3.8))
-                    _ax_sim.hist(_stored_risk["samples_current"], bins=32, alpha=0.55,
-                                 label="Current LAB range")
+                    _fig_sim, _ax_sim = plt.subplots(figsize=(9.6, 4.2))
+                    _current = np.sort(np.asarray(_stored_risk["samples_current"], dtype=float))
+                    _y_current = np.arange(1, len(_current) + 1) / len(_current) * 100
+                    _ax_sim.plot(_current, _y_current, linewidth=2.2, label="Current LAB range")
                     if _stored_risk["samples_chosen"] is not None:
-                        _ax_sim.hist(_stored_risk["samples_chosen"], bins=32, alpha=0.45,
-                                     label="Candidate LAB range")
-                    _ax_sim.axvline(_risk_spec, linestyle="--", color="#a72626",
-                                    linewidth=1.6, label=f"LINE DE specification = {_risk_spec:.2f}")
+                        _chosen = np.sort(np.asarray(_stored_risk["samples_chosen"], dtype=float))
+                        _y_chosen = np.arange(1, len(_chosen) + 1) / len(_chosen) * 100
+                        _ax_sim.plot(_chosen, _y_chosen, linewidth=2.2, label="Candidate LAB range")
+                    _spec_line = float(_stored_risk.get("risk_spec", _risk_spec))
+                    _ax_sim.axvline(_spec_line, linestyle="--", color="#a72626",
+                                    linewidth=1.8, label=f"LINE ΔE* specification = {fmt_num_trim(_spec_line)}")
                     _ax_sim.set_xlabel("Simulated LINE ΔE* (CIE76)")
-                    _ax_sim.set_ylabel("Number of simulations")
-                    _ax_sim.legend(frameon=False)
-                    _ax_sim.grid(axis="y", alpha=0.2)
+                    _ax_sim.set_ylabel("Cumulative probability (%)")
+                    _ax_sim.set_ylim(0, 100)
+                    _ax_sim.grid(alpha=0.25)
+                    _ax_sim.legend(frameon=False, loc="lower right")
                     st.pyplot(_fig_sim, use_container_width=True)
                     plt.close(_fig_sim)
+                    st.caption("曲線表示模擬 LINE ΔE* 的累積分布；曲線越靠左代表風險越低。紅色虛線為 ΔE* 規格上限。")
 
                     with st.expander("📋 查看計算公式、情境明細與歷史 Shift", expanded=False):
                         st.caption(
-                            "Shift = LINE − LAB（逐批完整三因子）；模擬 LINE = 抽樣 LAB + 一筆歷史 Shift；"
+                            "Shift = LINE − LAB（逐批完整三因子）；模擬 LINE = 抽樣 LAB + 一筆完整歷史 Shift；"
                             "ΔE* = √(LINE ΔL² + LINE Δa² + LINE Δb²)；"
                             "模擬超標率 = ΔE* > 標準的次數 / 10,000 × 100%。"
                         )
-                        st.dataframe(_result_scenarios.style.format({
-                            "模擬超標率 (%)": "{:.2f}", "模擬 LINE ΔE* P95": "{:.3f}",
-                            "LAB 歷史接受率 (%)": "{:.1f}",
-                        }, na_rep="—"), use_container_width=True, hide_index=True)
-                        st.dataframe(_risk_data[["製造批號", "Time", *_paired_cols,
-                                                 *(f"Shift_{f}" for f in _factors_risk), "LINE ΔE* (CIE76)"]],
-                                     use_container_width=True, hide_index=True)
+                        _scenario_show = _result_scenarios.copy()
+                        for _col in ["縮減比例 (%)", "模擬超標率 (%)", "模擬 LINE ΔE* P95", "LAB 歷史接受率 (%)",
+                                     "合格 LAB 中 LINE 實際超標率 (%)", "ΔL LCL", "ΔL UCL", "Δa LCL", "Δa UCL", "Δb LCL", "Δb UCL"]:
+                            if _col in _scenario_show.columns:
+                                if "%" in _col:
+                                    _scenario_show[_col] = _scenario_show[_col].map(fmt_percent_trim)
+                                else:
+                                    _scenario_show[_col] = _scenario_show[_col].map(fmt_num_trim)
+                        for _col in ["LAB 歷史合格批數", "合格 LAB 中 LINE 實際超標批數"]:
+                            if _col in _scenario_show.columns:
+                                _scenario_show[_col] = _scenario_show[_col].map(fmt_num_trim)
+                        st.dataframe(_scenario_show, use_container_width=True, hide_index=True)
+                        _risk_display = _risk_data[["製造批號", "Time", *_paired_cols,
+                                                    *(f"Shift_{f}" for f in _factors_risk), "LINE ΔE* (CIE76)"]].copy()
+                        _numeric_cols = [c for c in _risk_display.columns if c not in ["製造批號", "Time"]]
+                        for _col in _numeric_cols:
+                            _risk_display[_col] = _risk_display[_col].map(fmt_num_trim)
+                        st.dataframe(_risk_display, use_container_width=True, hide_index=True)
                     st.download_button(
                         "📥 下載歷史風險模擬與計算明細 (Excel)",
                         data=_stored_risk["excel"], file_name=_stored_risk["filename"],
