@@ -1790,530 +1790,132 @@ elif app_mode == "🎛️ Control Limit Calculator":
         )
 
     # ---------------------------------------------------------
-    # NEW: LAB -> LINE Delta E* OUTPUT RISK VALIDATION
-    # Observational paired-batch analysis only; no invented extrapolation.
-    # Original figures, SPC control rules, and calculated limit values unchanged.
+    # OPTIONAL REPORT TABLE 5 (CALCULATE ONLY ON BUTTON CLICK)
+    # No changes to existing figures, SPC calculations, or Task 3 charts.
     # ---------------------------------------------------------
-    st.markdown("---")
-    st.markdown("## 🔬 LAB–LINE ΔE* Output Risk Validation / 產出風險驗證")
-    st.caption(
-        "驗證當 LAB ΔL*、Δa*、Δb* 同時符合入料界限時，LINE ΔE* > 1.00 的觀察風險。"
-        "此項分析不以 LINE 各因子之管制界限作為合格判定；產出只以 ΔE* 為標準。"
-    )
-    output_de_threshold = st.number_input(
-        "LINE output ΔE* specification (CIE76)",
-        min_value=0.01, value=1.00, step=0.05, format="%.2f",
-        key="task3_de_output_spec",
-    )
-    st.caption(
-        "Assumes ΔE*76 = sqrt(ΔL*² + Δa*² + Δb*²), relative to the same color target. "
-        "Confirm the factory uses CIE76 and that the three LINE components share the same reference."
-    )
+    with st.expander("📥 表5 LINE ΔE* 驗證 — Excel Export", expanded=False):
+        st.caption("僅於按下按鈕時分析四個色號；其餘功能及圖表保持不變。")
+        st.caption("依報告的最終 LAB 入料允收範圍計算，非重新使用未定案的 IQR/Standard 範圍。")
 
-    if len(calc_res) != 3 or paired_all.empty:
-        st.warning("需要完整的 3 項 LAB–LINE 配對資料（ΔL*、Δa*、Δb*），才能驗證 LINE ΔE* 風險。")
-    else:
-        required_pair = [f"LAB_{f}" for f in factors] + [f"LINE_{f}" for f in factors]
-        risk_pairs = paired_all.dropna(subset=required_pair).copy()
-        for _f in factors:
-            risk_pairs[f"Shift_{_f}"] = risk_pairs[f"LINE_{_f}"] - risk_pairs[f"LAB_{_f}"]
-        risk_pairs["LINE_ΔE*"] = np.sqrt(
-            sum(risk_pairs[f"LINE_{_f}"].astype(float) ** 2 for _f in factors)
-        )
-        risk_pairs["LAB_ΔE*"] = np.sqrt(
-            sum(risk_pairs[f"LAB_{_f}"].astype(float) ** 2 for _f in factors)
-        )
-        risk_pairs["LINE_Fail"] = risk_pairs["LINE_ΔE*"] > output_de_threshold
-
-        st.markdown("### 1. LAB → LINE component shift / 色差偏移")
-        shift_rows = []
-        for _f in factors:
-            _delta = risk_pairs[f"Shift_{_f}"].dropna()
-            shift_rows.append({
-                "Factor": delta_label(_f),
-                "Paired n": len(_delta),
-                "LINE − LAB Mean": _delta.mean(),
-                "Shift SD": _delta.std(ddof=1),
-                "Shift Min": _delta.min(),
-                "Shift Max": _delta.max(),
-            })
-        st.dataframe(pd.DataFrame(shift_rows).style.format({
-            "LINE − LAB Mean": "{:.3f}", "Shift SD": "{:.3f}",
-            "Shift Min": "{:.3f}", "Shift Max": "{:.3f}",
-        }, na_rep="—"), use_container_width=True, hide_index=True)
-        st.caption("LINE − LAB 顯示實際生產偏移；三個色差因子可能同時變動，不能視為相互獨立。")
-
-        # Define each LAB acceptance box with exactly the limits computed by Task 3.
-        candidate_methods = {
-            "Standard Method": ("std_lcl", "std_ucl"),
-            "IQR": ("iqr_lcl", "iqr_ucl"),
-            "Recommended (intersection)": ("rec_lcl", "rec_ucl"),
-        }
-        method_rows = []
-        detailed = {}
-        st.markdown("### 2. Define LAB acceptance windows / LAB 三項同時合格條件")
-        for _method, (_lo_key, _hi_key) in candidate_methods.items():
-            _valid = all(
-                calc_res[_f].get(_lo_key) is not None
-                and calc_res[_f].get(_hi_key) is not None
-                and np.isfinite(calc_res[_f][_lo_key])
-                and np.isfinite(calc_res[_f][_hi_key])
-                and calc_res[_f][_lo_key] <= calc_res[_f][_hi_key]
-                for _f in factors
-            )
-            if not _valid:
-                method_rows.append({
-                    "Method": _method, "LAB accepted (n)": 0,
-                    "LINE ΔE* > spec (n)": None, "Observed risk (%)": np.nan,
-                    "Upper risk 95% (%)": np.nan, "Acceptance (%)": np.nan,
-                    "Result": "Invalid / no overlapping limits",
-                })
-                continue
-            _accept = pd.Series(True, index=risk_pairs.index)
-            for _f in factors:
-                _accept &= risk_pairs[f"LAB_{_f}"].between(
-                    calc_res[_f][_lo_key], calc_res[_f][_hi_key], inclusive="both"
-                )
-            _accepted = risk_pairs.loc[_accept].copy()
-            _n = len(_accepted)
-            _k = int(_accepted["LINE_Fail"].sum())
-            _risk = 100 * _k / _n if _n else np.nan
-            _upper = np.nan
-            if _n:
-                try:
-                    from scipy.stats import beta as _beta_dist
-                    # Exact, one-sided 95% Clopper-Pearson upper bound.
-                    _upper = 100.0 if _k == _n else 100.0 * float(_beta_dist.ppf(0.95, _k + 1, _n - _k))
-                except ImportError:
-                    # Fallback is exact for zero failures; otherwise show no CI.
-                    if _k == 0:
-                        _upper = 100 * (1 - 0.05 ** (1 / _n))
-            method_rows.append({
-                "Method": _method,
-                "LAB accepted (n)": _n,
-                "LINE ΔE* > spec (n)": _k,
-                "Observed risk (%)": _risk,
-                "Upper risk 95% (%)": _upper,
-                "Acceptance (%)": 100 * _n / len(risk_pairs) if len(risk_pairs) else np.nan,
-                "Result": "Limited sample" if _n < 30 else "Historical estimate only",
-            })
-            detailed[_method] = (_accept, _accepted)
-
-        # ---------------------------------------------------------
-        # SHIFT ENVELOPE / HISTORICAL WORST-CASE VALIDATION (NEW)
-        # This is a deterministic stress test, NOT a probability forecast.
-        # Original Task 3 charts and limit calculations stay unchanged.
-        # ---------------------------------------------------------
-        st.markdown("### 3. LAB–LINE Shift Worst-case Check / 偏移最不利情境驗證")
-        st.caption(
-            "以歷史 LINE−LAB 偏移最小值／最大值，搭配 LAB 各因子之 LCL／UCL，"
-            "計算可能的最不利 LINE ΔE*。此為歷史偏移範圍情境分析，不是未來保證或失敗機率。"
-        )
-        shift_envelopes = {}
-        for _factor in factors:
-            _shift_values = pd.to_numeric(risk_pairs[f"Shift_{_factor}"], errors="coerce").dropna()
-            if len(_shift_values):
-                shift_envelopes[_factor] = (float(_shift_values.min()), float(_shift_values.max()))
-
-        worst_rows = []
-        component_details = []
-        for _method, (_lo_key, _hi_key) in candidate_methods.items():
-            _valid = bool(len(risk_pairs)) and len(shift_envelopes) == 3 and all(
-                calc_res[_factor].get(_lo_key) is not None
-                and calc_res[_factor].get(_hi_key) is not None
-                and np.isfinite(calc_res[_factor][_lo_key])
-                and np.isfinite(calc_res[_factor][_hi_key])
-                and calc_res[_factor][_lo_key] <= calc_res[_factor][_hi_key]
-                for _factor in factors
-            )
-            if not _valid:
-                worst_rows.append({
-                    "Method": _method,
-                    "Historical shift-vector worst ΔE*": np.nan,
-                    "Component envelope worst ΔE*": np.nan,
-                    "Margin to spec": np.nan,
-                    "Shift scenario check": "Not evaluable",
-                })
-                continue
-
-            _component_max_abs = []
-            _lo_vec, _hi_vec = [], []
-            for _factor in factors:
-                _lcl = float(calc_res[_factor][_lo_key])
-                _ucl = float(calc_res[_factor][_hi_key])
-                _shift_min, _shift_max = shift_envelopes[_factor]
-                # All 4 endpoints: LCL/UCL + min/max historical shift.
-                _candidates = (_lcl + _shift_min, _lcl + _shift_max,
-                               _ucl + _shift_min, _ucl + _shift_max)
-                _max_abs = max(abs(v) for v in _candidates)
-                _component_max_abs.append(_max_abs)
-                _lo_vec.append(_lcl)
-                _hi_vec.append(_ucl)
-                component_details.append({
-                    "Method": _method,
-                    "Factor": delta_label(_factor),
-                    "LAB LCL": _lcl, "LAB UCL": _ucl,
-                    "Shift min": _shift_min, "Shift max": _shift_max,
-                    "Worst |LINE component|": _max_abs,
-                })
-
-            # Conservative rectangle: independent extremes from different historical
-            # batches may be combined. Appropriate as a stress envelope, not a prediction.
-            _envelope_de = float(np.linalg.norm(_component_max_abs))
-
-            # Coherent historical vectors: keep each batch's three shifts together.
-            # For a fixed shift vector, max Euclidean norm over a LAB box occurs at a corner.
-            _shift_vectors = risk_pairs[[f"Shift_{_factor}" for _factor in factors]].to_numpy(dtype=float)
-            _corners = np.array([
-                [a, b, c]
-                for a in (_lo_vec[0], _hi_vec[0])
-                for b in (_lo_vec[1], _hi_vec[1])
-                for c in (_lo_vec[2], _hi_vec[2])
-            ], dtype=float)
-            _shift_de = np.sqrt(np.sum(
-                (_shift_vectors[:, None, :] + _corners[None, :, :]) ** 2, axis=2
-            ))
-            _observed_vector_worst = float(np.max(_shift_de))
-            _margin = float(output_de_threshold - _envelope_de)
-            _status = "Within historical shift envelope" if _margin >= 0 else "Potential exceedance"
-            worst_rows.append({
-                "Method": _method,
-                "Historical shift-vector worst ΔE*": _observed_vector_worst,
-                "Component envelope worst ΔE*": _envelope_de,
-                "Margin to spec": _margin,
-                "Shift scenario check": _status,
-            })
-
-        worst_comparison = pd.DataFrame(worst_rows)
-        st.dataframe(
-            worst_comparison.style.format({
-                "Historical shift-vector worst ΔE*": "{:.3f}",
-                "Component envelope worst ΔE*": "{:.3f}",
-                "Margin to spec": "{:+.3f}",
-            }, na_rep="—"),
-            use_container_width=True, hide_index=True,
-        )
-        st.caption(
-            "Historical shift-vector: giữ nguyên bộ 3 Shift của từng batch; "
-            "Component envelope: kết hợp Shift min/max của từng yếu tố, có thể đến từ các batch khác nhau "
-            "nên bảo thủ hơn. Margin = ΔE* spec − Component envelope. "
-            "Bằng giới hạn 1.00 là đạt; chỉ giá trị > 1.00 mới vượt."
-        )
-        if len(risk_pairs) < 30:
-            st.warning(
-                f"⚠️ Chỉ có {len(risk_pairs)} batch ghép đủ 3 yếu tố: khoảng Shift lịch sử "
-                "có thể chưa bao phủ các biến động tương lai. Chưa đủ cơ sở để xác nhận độ an toàn của giới hạn LAB."
-            )
-        else:
-            st.info(
-                "Shift envelope chỉ là kiểm tra tình huống dựa trên dữ liệu lịch sử. "
-                "Cần tiếp tục xác nhận bằng các batch sản xuất mới, nhất là sát giới hạn LAB."
-            )
-        with st.expander("📋 LAB limit + Shift endpoints for each method / 計算明細"):
-            st.dataframe(
-                pd.DataFrame(component_details).style.format({
-                    "LAB LCL": "{:.3f}", "LAB UCL": "{:.3f}",
-                    "Shift min": "{:.3f}", "Shift max": "{:.3f}",
-                    "Worst |LINE component|": "{:.3f}",
-                }, na_rep="—"), hide_index=True, use_container_width=True,
-            )
-
-        st.markdown("### 4. Observed Failure Rate / 實際超標率")
-        risk_comparison = pd.DataFrame(method_rows)
-        st.dataframe(risk_comparison.style.format({
-            "Observed risk (%)": "{:.2f}", "Upper risk 95% (%)": "{:.2f}",
-            "Acceptance (%)": "{:.1f}",
-        }, na_rep="—"), hide_index=True, use_container_width=True)
-        st.caption(
-            "Observed risk = LINE ΔE* 超標批數 / LAB 三項皆在界限內的批數。"
-            "Upper risk 95% 為單側 Clopper–Pearson 二項分布信賴上界；"
-            "僅在批次可近似視為獨立且失敗率穩定時適用。"
-        )
-        if len(risk_pairs) < 30:
-            st.warning(
-                f"⚠️ 目前僅 {len(risk_pairs)} 個有效配對批次。樣本過少，"
-                "不能據此證明 LAB 合格時 LINE ΔE* 必定 ≤ 1.00，也無法可靠估計極低的失敗率。"
-            )
-        else:
-            st.info(
-                "此為歷史樣本的條件失敗率，不是未來每一批都合格的保證。"
-                "由相同資料計算入料界限及驗證風險可能產生樂觀偏差；建議另以新批次進行驗證。"
-            )
-
-        st.markdown("### 5. Paired batch verification / 逐批驗證")
-        selected_method = st.selectbox(
-            "Select incoming LAB limit method", list(detailed.keys()),
-            key="task3_risk_method",
-        ) if detailed else None
-        if selected_method:
-            chosen_mask, chosen_pairs = detailed[selected_method]
-            batch_view = risk_pairs[[
-                "製造批號", "Time", "LAB_ΔL", "LAB_Δa", "LAB_Δb",
-                "LINE_ΔL", "LINE_Δa", "LINE_Δb", "LAB_ΔE*", "LINE_ΔE*",
-                "Shift_ΔL", "Shift_Δa", "Shift_Δb",
-            ]].copy()
-            batch_view.insert(2, "LAB within all limits", chosen_mask.to_numpy())
-            batch_view["LINE ΔE* status"] = np.where(
-                risk_pairs["LINE_Fail"], "FAIL", "PASS"
-            )
-            st.dataframe(batch_view, hide_index=True, use_container_width=True)
-            fig_risk, ax_risk = plt.subplots(figsize=(10.5, 4.6))
-            seq = np.arange(1, len(risk_pairs) + 1)
-            ax_risk.plot(seq, risk_pairs["LINE_ΔE*"], color="#ed7d31", marker="D",
-                         linewidth=1.7, markersize=5, label="LINE ΔE* output")
-            ax_risk.axhline(output_de_threshold, color="#dc2626", linestyle="--",
-                            linewidth=1.5, label=f"Output specification {output_de_threshold:.2f}")
-            ax_risk.scatter(seq[chosen_mask.to_numpy()],
-                            risk_pairs.loc[chosen_mask, "LINE_ΔE*"],
-                            s=85, facecolors="none", edgecolors="#5b9bd5",
-                            linewidths=1.7, label=f"LAB accepted ({selected_method})", zorder=5)
-            ax_risk.set_xticks(seq)
-            ax_risk.set_xticklabels([str(i) for i in seq])
-            ax_risk.set_xlabel("Batch sequence")
-            ax_risk.set_ylabel("LINE ΔE*")
-            ax_risk.set_title("LINE ΔE* Output vs. LAB Acceptance", fontweight="bold")
-            ax_risk.grid(axis="y", color="#c9c9c9", linewidth=0.8)
-            ax_risk.legend(loc="best", frameon=False)
-            st.pyplot(fig_risk)
-            plt.close(fig_risk)
-
-            output_buf = io.BytesIO()
-            with pd.ExcelWriter(output_buf, engine="openpyxl") as w:
-                risk_comparison.to_excel(w, sheet_name="Method_Risk_Comparison", index=False)
-                worst_comparison.to_excel(w, sheet_name="Shift_Worst_Case", index=False)
-                pd.DataFrame(component_details).to_excel(w, sheet_name="Shift_Endpoint_Detail", index=False)
-                pd.DataFrame(shift_rows).to_excel(w, sheet_name="LAB_LINE_Shift", index=False)
-                batch_view.to_excel(w, sheet_name="Paired_Batch_Check", index=False)
-                pd.DataFrame([
-                    {"Setting": "Color code", "Value": str(color)},
-                    {"Setting": "Output DE specification", "Value": output_de_threshold},
-                    {"Setting": "Selected LAB method", "Value": selected_method},
-                    {"Setting": "LINE DE calculation", "Value": "CIE76 from paired LINE mean components"},
-                    {"Setting": "Caution", "Value": "Worst-case is a historical shift-envelope stress test, NOT a probability or future guarantee"},
-                    {"Setting": "Data caution", "Value": "LAB limits may be derived from the same data; validate on later independent batches"},
-                ]).to_excel(w, sheet_name="Method_Notes", index=False)
-            st.download_button(
-                "📥 Download LAB–LINE Output Risk (Excel)", output_buf.getvalue(),
-                file_name=f"{_safe_color_name}_LAB_LINE_Output_Risk.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="task3_risk_export",
-            )
-
-    # ---------------------------------------------------------
-    # REPORT TABLE 5: MULTI-COLOR APPROVED-LIMIT VERIFICATION
-    # Deliberately runs on demand; uses df_raw rather than sidebar-filtered df.
-    # This does not change any existing SPC formula or chart.
-    # ---------------------------------------------------------
-    st.markdown("---")
-    st.markdown("## 📋 表5 入料管制界限之 LINE 產出色差風險驗證")
-    st.caption(
-        "此表使用報告最後選定的 LAB 入料管制界限，不使用未經選定的 IQR/σ 初始範圍。"
-        "四種色號採全期間來源資料，與側邊欄的單一色號／年月篩選獨立；按下計算才開始處理。"
-    )
-
-    _report_limit_defaults = {
-        "PK2E1230L": ((0.10, 0.45), (0.00, 0.40), (-0.10, 0.25)),
-        "PS2E123PS": ((-0.10, 0.20), (-0.10, 0.20), (-0.20, 0.10)),
-        "PS2U188TP": ((-0.10, 0.40), (-0.20, 0.10), (0.00, 0.30)),
-        "PT20428A1": ((-0.20, 0.20), (-0.20, 0.10), (-0.20, 0.30)),
-    }
-    _report_limit_rows = []
-    for _code, _lim in _report_limit_defaults.items():
-        _report_limit_rows.append({
-            "Color Code": _code,
-            "ΔL LCL": _lim[0][0], "ΔL UCL": _lim[0][1],
-            "Δa LCL": _lim[1][0], "Δa UCL": _lim[1][1],
-            "Δb LCL": _lim[2][0], "Δb UCL": _lim[2][1],
-        })
-    st.caption("預設界限出自目前報告結論表；如已修改最終採用值，可直接編輯下表。")
-    _report_limit_edit = st.data_editor(
-        pd.DataFrame(_report_limit_rows), hide_index=True, use_container_width=True,
-        disabled=["Color Code"], key="task3_report_final_limits_editor",
-        column_config={"Color Code": st.column_config.TextColumn("Color Code", disabled=True)},
-    )
-
-    def _build_report_table5(all_data, edited_limits, threshold):
-        """Historical shift-envelope stress check; not a forecast of failure probability."""
-        table_rows, detail_frames, shift_rows, endpoint_rows = [], [], [], []
-        factor_names = ("ΔL", "Δa", "Δb")
-        available = all_data["塗料編號"].astype("string").str.strip()
-        for _, limit_row in edited_limits.iterrows():
-            code = str(limit_row["Color Code"]).strip()
-            limits = []
-            for f in factor_names:
-                lo, hi = float(limit_row[f"{f} LCL"]), float(limit_row[f"{f} UCL"])
-                if not (np.isfinite(lo) and np.isfinite(hi) and lo <= hi):
-                    raise ValueError(f"{code}: Invalid final limits for {f}; require finite LCL <= UCL")
-                limits.append((lo, hi))
-            color_df = all_data.loc[available == code, SPC_INPUT_COLUMNS]
-            if color_df.empty:
-                table_rows.append({
-                    "Color Code": code, "LAB–LINE 最大推估 ΔE*": np.nan,
-                    "LINE ΔE* 標準": threshold, "安全裕度": np.nan,
-                    "實際 LINE 超標率 (%)": np.nan, "LAB 合格批數": 0,
-                    "LAB 合格且 LINE 超標批數": 0, "有效配對批數": 0,
-                    "評估結果": "無此色號資料",
-                })
-                continue
-            batch_data = calculate_batch_averages(color_df)
-            combined = None
-            for f in factor_names:
-                lab = batch_data[f]["lab"][["製造批號", "Time", "value"]].rename(
-                    columns={"Time": f"Time_{f}", "value": f"LAB_{f}"}
-                )
-                line = batch_data[f]["line"][["製造批號", "value"]].rename(
-                    columns={"value": f"LINE_{f}"}
-                )
-                part = lab.merge(line, on="製造批號", how="inner")
-                combined = part if combined is None else combined.merge(part, on="製造批號", how="inner")
-            necessary = [f"{source}_{f}" for source in ("LAB", "LINE") for f in factor_names]
-            combined = combined.dropna(subset=necessary).copy()
-            if combined.empty:
-                table_rows.append({
-                    "Color Code": code, "LAB–LINE 最大推估 ΔE*": np.nan,
-                    "LINE ΔE* 標準": threshold, "安全裕度": np.nan,
-                    "實際 LINE 超標率 (%)": np.nan, "LAB 合格批數": 0,
-                    "LAB 合格且 LINE 超標批數": 0, "有效配對批數": 0,
-                    "評估結果": "無完整 LAB–LINE 配對批次",
-                })
-                continue
-            accept = np.ones(len(combined), dtype=bool)
-            endpoint_abs = []
-            for f, (lo, hi) in zip(factor_names, limits):
-                lab_col = f"LAB_{f}"
-                line_col = f"LINE_{f}"
-                shift_col = f"Shift_{f}"
-                combined[shift_col] = combined[line_col] - combined[lab_col]
-                accept &= combined[lab_col].between(lo, hi, inclusive="both").to_numpy()
-                smin = float(combined[shift_col].min())
-                smax = float(combined[shift_col].max())
-                predicted_min = lo + smin
-                predicted_max = hi + smax
-                maximum_abs = max(abs(predicted_min), abs(predicted_max))
-                endpoint_abs.append(maximum_abs)
-                shift_rows.append({
-                    "Color Code": code, "Factor": f,
-                    "Shift Min": smin, "Shift Max": smax,
-                    "Shift Mean": float(combined[shift_col].mean()),
-                    "Shift SD": float(combined[shift_col].std(ddof=1)) if len(combined) > 1 else np.nan,
-                    "Valid paired batches": len(combined),
-                })
-                endpoint_rows.append({
-                    "Color Code": code, "Factor": f,
-                    "LAB LCL": lo, "LAB UCL": hi,
-                    "Shift Min": smin, "Shift Max": smax,
-                    "LINE Min (LCL+Shift Min)": predicted_min,
-                    "LINE Max (UCL+Shift Max)": predicted_max,
-                    "Worst absolute LINE component": maximum_abs,
-                })
-            combined["LAB Accepted"] = accept
-            combined["LINE ΔE* (batch CIE76)"] = np.sqrt(
-                sum(combined[f"LINE_{f}"].astype(float) ** 2 for f in factor_names)
-            )
-            combined["LINE Fail"] = combined["LINE ΔE* (batch CIE76)"] > threshold
-            accepted_n = int(accept.sum())
-            failed_n = int((combined["LAB Accepted"] & combined["LINE Fail"]).sum())
-            worst = float(np.linalg.norm(endpoint_abs))
-            margin = float(threshold - worst)
-            actual_failure = (100 * failed_n / accepted_n) if accepted_n else np.nan
-            if accepted_n == 0:
-                status = "無 LAB 合格配對批次，待驗證"
-            elif failed_n:
-                status = "實際產出超標"
-            elif worst > threshold:
-                status = "歷史偏移情境存在超標風險"
-            else:
-                status = "歷史情境符合，待持續驗證"
-            table_rows.append({
-                "Color Code": code,
-                "LAB–LINE 最大推估 ΔE*": worst,
-                "LINE ΔE* 標準": threshold,
-                "安全裕度": margin,
-                "實際 LINE 超標率 (%)": actual_failure,
-                "LAB 合格批數": accepted_n,
-                "LAB 合格且 LINE 超標批數": failed_n,
-                "有效配對批數": len(combined),
-                "評估結果": status,
-            })
-            combined.insert(0, "Color Code", code)
-            detail_frames.append(combined)
-        summary = pd.DataFrame(table_rows)
-        details = pd.concat(detail_frames, ignore_index=True) if detail_frames else pd.DataFrame()
-        return summary, details, pd.DataFrame(shift_rows), pd.DataFrame(endpoint_rows)
-
-    _recalculate_table5 = st.button(
-        "🧮 Calculate & Prepare Excel — All 4 Colors",
-        key="task3_calculate_report_table5",
-        type="primary",
-    )
-    if _recalculate_table5:
-        try:
-            _summary5, _batch5, _shift5, _endpoints5 = _build_report_table5(
-                df_raw, _report_limit_edit, float(output_de_threshold)
-            )
-            _note5 = pd.DataFrame([
-                {"Item": "Source", "Description": "Uploaded Production / SPC Data; all dates, 4 report colors (not sidebar-filtered)"},
-                {"Item": "Limits", "Description": "Editable report final LAB limits; may differ from provisional IQR or sigma values"},
-                {"Item": "Aggregation", "Description": "LAB batch mean; LINE N/S row average then batch mean; only complete LAB-LINE paired batches"},
-                {"Item": "LINE Delta E", "Description": "CIE76 = sqrt(batch LINE Delta L^2 + Delta a^2 + Delta b^2); confirm same reference and factory specification"},
-                {"Item": "Historical worst", "Description": "Combine LAB bound and component-wise observed Shift Min/Max; conservative envelope, not a probability or future guarantee"},
-                {"Item": "Safety margin", "Description": "LINE DE specification minus historical worst-case DE"},
-                {"Item": "Actual exceedance", "Description": "Of paired batches with all three LAB factors inside final limits, share with LINE batch CIE76 > specification"},
-                {"Item": "Important", "Description": "Batch averages may conceal individual failing coils. Validate separately at coil-level where appropriate."},
-                {"Item": "Confidence", "Description": "A small number of observed batches does not prove future zero failure probability. Independent post-limit validation is recommended."},
-            ])
-            _output5 = io.BytesIO()
-            with pd.ExcelWriter(_output5, engine="openpyxl") as _writer5:
-                _summary5.to_excel(_writer5, sheet_name="Table5_Report", index=False)
-                _report_limit_edit.to_excel(_writer5, sheet_name="Final_LAB_Limits", index=False)
-                _shift5.to_excel(_writer5, sheet_name="Shift_Statistics", index=False)
-                _endpoints5.to_excel(_writer5, sheet_name="Worst_Case_Calculation", index=False)
-                _batch5.to_excel(_writer5, sheet_name="Paired_Batch_Detail", index=False)
-                _note5.to_excel(_writer5, sheet_name="Method_Notes", index=False)
-                for _ws in _writer5.book.worksheets:
-                    _ws.freeze_panes = "A2"
-                    _ws.auto_filter.ref = _ws.dimensions
-                    from openpyxl.utils import get_column_letter as _column_letter5
-                    for _col5 in _ws.columns:
-                        _header5 = str(_col5[0].value or "")
-                        _ws.column_dimensions[_column_letter5(_col5[0].column)].width = min(max(len(_header5) + 2, 15), 38)
-            st.session_state["task3_report_table5_output"] = {
-                "summary": _summary5,
-                "excel": _output5.getvalue(),
-                "source_signature": (
-                    uploaded_data_file.name, __import__("hashlib").sha256(uploaded_data_file.getvalue()).hexdigest(),
-                    float(output_de_threshold), _report_limit_edit.to_json(orient="records")
-                ),
+        def _make_table5_report(raw, spec=1.00):
+            # Report-final LAB limits (from supplied report, Table 5).
+            final_limits = {
+                "PK2E1230L": ((0.10, 0.45), (0.00, 0.40), (-0.10, 0.25)),
+                "PS2E123PS": ((-0.10, 0.20), (-0.10, 0.20), (-0.20, 0.10)),
+                "PS2U188TP": ((-0.10, 0.40), (-0.20, 0.10), (0.00, 0.30)),
+                "PT20428A1": ((-0.20, 0.20), (-0.20, 0.10), (-0.20, 0.30)),
             }
-        except (ValueError, TypeError, KeyError) as _e5:
-            st.error(f"Cannot build Table 5: {_e5}")
-    _ready5 = st.session_state.get("task3_report_table5_output")
-    _current_sig5 = (uploaded_data_file.name, __import__("hashlib").sha256(uploaded_data_file.getvalue()).hexdigest(),
-                     float(output_de_threshold), _report_limit_edit.to_json(orient="records"))
-    if _ready5 and _ready5["source_signature"] == _current_sig5:
-        _display5 = _ready5["summary"]
-        st.dataframe(_display5.style.format({
-            "LAB–LINE 最大推估 ΔE*": "{:.3f}",
-            "LINE ΔE* 標準": "≤{:.2f}",
-            "安全裕度": "{:+.3f}",
-            "實際 LINE 超標率 (%)": "{:.2f}%",
-        }, na_rep="—"), hide_index=True, use_container_width=True)
-        _selected5 = _display5[_display5["Color Code"] == str(color)]
-        if not _selected5.empty:
-            st.caption(f"目前選定色號：{color}；上方則為四種色號報告摘要。")
-        st.download_button(
-            "📥 Download 表5 + Calculation Details (Excel)",
-            data=_ready5["excel"],
-            file_name="SPC_Table5_All_Colors_Risk_Verification.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="task3_report_table5_download",
-        )
-        st.caption(
-            "注意：最大推估 ΔE* 為依歷史 Shift 範圍建立之保守情境值；"
-            "不能解讀為真實未來失敗機率或絕對保證。有效配對數過少時，僅供初步驗證。"
-        )
-    elif _ready5:
-        st.info("Source file, acceptance limits or ΔE* specification changed. Click Calculate again to refresh Excel.")
+            factors = ("ΔL", "Δa", "Δb")
+            needed = ["塗料編號", "製造批號", "Time"] + [
+                c for f in factors for c in (f"入料檢測 {f} 正面", f"正-北 {f}", f"正-南 {f}")
+            ]
+            missing = [c for c in needed if c not in raw.columns]
+            if missing:
+                raise ValueError("Missing input columns: " + ", ".join(missing))
+            data = raw.loc[raw["塗料編號"].isin(final_limits), needed].copy()
+            for c in needed[3:]:
+                data[c] = pd.to_numeric(data[c], errors="coerce")
+            # Must preserve original SPC aggregation: mean(North,South) per row,
+            # then average per manufacturing batch, not average of all coil samples.
+            for f in factors:
+                data[f"LINE_{f}"] = data[[f"正-北 {f}", f"正-南 {f}"]].mean(axis=1)
+            aggs = {"Time": "min"}
+            aggs.update({f"入料檢測 {f} 正面": "mean" for f in factors})
+            aggs.update({f"LINE_{f}": "mean" for f in factors})
+            batch = data.groupby(["塗料編號", "製造批號"], as_index=False).agg(aggs)
+            for f in factors:
+                batch.rename(columns={f"入料檢測 {f} 正面": f"LAB_{f}"}, inplace=True)
+            complete_cols = [f"LAB_{f}" for f in factors] + [f"LINE_{f}" for f in factors]
+            batch = batch.dropna(subset=complete_cols).copy()
+            for f in factors:
+                batch[f"Shift_{f}"] = batch[f"LINE_{f}"] - batch[f"LAB_{f}"]
+            batch["LINE_ΔE"] = np.sqrt(sum(batch[f"LINE_{f}"] ** 2 for f in factors))
+
+            results = {}
+            shift_rows = []
+            for code, bounds in final_limits.items():
+                sub = batch.loc[batch["塗料編號"] == code].copy()
+                if sub.empty:
+                    results[code] = {"worst": None, "margin": None, "failure": None,
+                                     "status": "資料不足", "accepted": 0}
+                    continue
+                max_components = []
+                mask = pd.Series(True, index=sub.index)
+                for i, f in enumerate(factors):
+                    low, high = bounds[i]
+                    shift_min = float(sub[f"Shift_{f}"].min())
+                    shift_max = float(sub[f"Shift_{f}"].max())
+                    max_comp = max(abs(low + shift_min), abs(high + shift_max))
+                    max_components.append(max_comp)
+                    mask &= sub[f"LAB_{f}"].between(low, high, inclusive="both")
+                    shift_rows.append({"塗料編號": code, "因子": f,
+                                       "LAB_LCL": low, "LAB_UCL": high,
+                                       "Shift_Min": shift_min, "Shift_Max": shift_max,
+                                       "Worst_Abs_LINE": max_comp})
+                worst = float(np.sqrt(sum(v*v for v in max_components)))
+                accepted = sub.loc[mask]
+                fail_rate = (float((accepted["LINE_ΔE"] > spec).mean()) * 100
+                             if len(accepted) else None)
+                margin = spec - worst
+                if not len(accepted):
+                    status = "無LAB合格配對批次"
+                elif bool((accepted["LINE_ΔE"] > spec).any()):
+                    status = "實際產出超標"
+                elif margin < 0:
+                    status = "歷史變動情境有風險"
+                else:
+                    status = "歷史情境符合，待持續驗證"
+                results[code] = {"worst": worst, "margin": margin,
+                                 "failure": fail_rate, "status": status,
+                                 "accepted": len(accepted)}
+                batch.loc[sub.index, "LAB_合格"] = mask
+                batch.loc[sub.index, "LINE_超標"] = sub["LINE_ΔE"] > spec
+
+            cols = list(final_limits)
+            summary = pd.DataFrame({
+                "評估項目": ["LAB–LINE 最大推估 ΔE*", "LINE ΔE* 標準", "安全裕度",
+                             "實際 LINE 超標率", "LAB合格配對批數", "評估結果"]
+            })
+            for code in cols:
+                v = results[code]
+                summary[code] = [
+                    round(v["worst"], 3) if v["worst"] is not None else "—",
+                    "≤ 1.00",
+                    round(v["margin"], 3) if v["margin"] is not None else "—",
+                    f'{v["failure"]:.2f}%' if v["failure"] is not None else "—",
+                    v["accepted"], v["status"],
+                ]
+            limits_rows = [{"塗料編號": code, "因子": f, "LAB_LCL": bounds[i][0],
+                            "LAB_UCL": bounds[i][1]}
+                           for code, bounds in final_limits.items()
+                           for i, f in enumerate(factors)]
+            notes = pd.DataFrame({"說明": [
+                "LAB/LINE: 先取單筆北南平均，再依製造批號取平均。僅完整配對資料納入。",
+                "Shift = LINE - LAB；取所有完整歷史批次之Shift Min/Max。",
+                "Worst ΔE = sqrt(sum(max(abs(LCL+Shift_Min),abs(UCL+Shift_Max))^2))。",
+                "實際超標率 = 三項LAB均符合最終允收範圍，但LINE ΔE > 1.00之批數 / LAB合格配對批數。",
+                "歷史最不利情境不是未來失敗機率或絕對品質保證；樣本量不足須持續驗證。",
+                "ΔE採CIE76，需確認與工廠判定口徑一致。",
+            ]})
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                summary.to_excel(writer, sheet_name="Table5_Report", index=False)
+                pd.DataFrame(limits_rows).to_excel(writer, sheet_name="Final_LAB_Limits", index=False)
+                pd.DataFrame(shift_rows).to_excel(writer, sheet_name="Shift_Calculation", index=False)
+                batch.sort_values(["塗料編號", "Time"]).to_excel(writer, sheet_name="Paired_Batch_Detail", index=False)
+                notes.to_excel(writer, sheet_name="Method_Notes", index=False)
+            return summary, output.getvalue()
+
+        if st.button("Calculate 表5 & Prepare Excel", key="task3_simple_table5_button"):
+            try:
+                summary5, excel5 = _make_table5_report(df_raw)
+                st.dataframe(summary5, hide_index=True, use_container_width=True)
+                st.download_button("📥 Download 表5 Excel", excel5,
+                                   file_name="SPC_Table5_LAB_LINE_Verification.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   key="task3_simple_table5_excel")
+            except Exception as exc:
+                st.error(f"無法產生表5，請檢查資料格式：{exc}")
 
     # ---------------------------------------------------------
     # Task 3 Word Report Export
