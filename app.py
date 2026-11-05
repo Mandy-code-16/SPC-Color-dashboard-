@@ -1854,10 +1854,22 @@ elif app_mode == "🎛️ Control Limit Calculator":
                       for r in _limits.to_dict("records")),
                 tuple(selected_years), tuple(selected_months),
             )
+            # Version the result payload. Older app versions stored only the
+            # summary/Excel bytes, without the new component/proposal tables.
+            # Do not reuse those incomplete session-state dictionaries.
             _cache_key = "task3_selected_color_validation_export"
-            if (_cache_key in st.session_state
-                    and st.session_state[_cache_key].get("signature") != _signature):
-                del st.session_state[_cache_key]
+            _required_payload_keys = {
+                "signature", "result", "components", "proposal",
+                "comparison", "proposal_note", "bytes", "payload_version",
+            }
+            _previous_result = st.session_state.get(_cache_key)
+            if (
+                not isinstance(_previous_result, dict)
+                or _previous_result.get("payload_version") != 2
+                or not _required_payload_keys.issubset(_previous_result)
+                or _previous_result.get("signature") != _signature
+            ):
+                st.session_state.pop(_cache_key, None)
 
             if st.button("Calculate & Prepare Excel (selected color)",
                          key="task3_current_color_calculate"):
@@ -2070,6 +2082,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
                                 _ws.column_dimensions[_letter].width = min(max(_max_len + 2, 12), 42)
                     st.session_state[_cache_key] = {
                         "signature": _signature,
+                        "payload_version": 2,
                         "result": _result,
                         "components": _component_df,
                         "proposal": _proposal_df,
@@ -2079,7 +2092,12 @@ elif app_mode == "🎛️ Control Limit Calculator":
                     }
 
             _saved = st.session_state.get(_cache_key)
-            if _saved and _saved["signature"] == _signature:
+            if (
+                isinstance(_saved, dict)
+                and _saved.get("payload_version") == 2
+                and _required_payload_keys.issubset(_saved)
+                and _saved.get("signature") == _signature
+            ):
                 st.dataframe(_saved["result"], hide_index=True, use_container_width=True)
                 st.markdown("#### Worst-case ΔE* Component Contribution")
                 st.dataframe(_saved["components"].style.format({
