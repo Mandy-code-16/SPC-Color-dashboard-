@@ -2071,25 +2071,59 @@ elif app_mode == "🎛️ Control Limit Calculator":
                     else:
                         st.info("模擬結果仍須以新增生產批次獨立驗證，才能評估是否適用於現場管制。")
                     st.markdown("### ③ LINE ΔE* 模擬分布")
-                    _fig_sim, _ax_sim = plt.subplots(figsize=(9.6, 4.2))
-                    _current = np.sort(np.asarray(_stored_risk["samples_current"], dtype=float))
-                    _y_current = np.arange(1, len(_current) + 1) / len(_current) * 100
-                    _ax_sim.plot(_current, _y_current, linewidth=2.2, label="Current LAB range")
-                    if _stored_risk["samples_chosen"] is not None:
-                        _chosen = np.sort(np.asarray(_stored_risk["samples_chosen"], dtype=float))
-                        _y_chosen = np.arange(1, len(_chosen) + 1) / len(_chosen) * 100
-                        _ax_sim.plot(_chosen, _y_chosen, linewidth=2.2, label="Candidate LAB range")
+                    # Use a shared set of bins and side-by-side bars.  Avoid
+                    # translucent overlapping histograms that hide differences.
+                    _hist_cur = np.asarray(_stored_risk["samples_current"], dtype=float)
+                    _hist_candidate_raw = _stored_risk["samples_chosen"]
+                    _hist_cand = (np.asarray(_hist_candidate_raw, dtype=float)
+                                  if _hist_candidate_raw is not None else None)
                     _spec_line = float(_stored_risk.get("risk_spec", _risk_spec))
-                    _ax_sim.axvline(_spec_line, linestyle="--", color="#a72626",
-                                    linewidth=1.8, label=f"LINE ΔE* specification = {fmt_num_trim(_spec_line)}")
-                    _ax_sim.set_xlabel("Simulated LINE ΔE* (CIE76)")
-                    _ax_sim.set_ylabel("Cumulative probability (%)")
-                    _ax_sim.set_ylim(0, 100)
-                    _ax_sim.grid(alpha=0.25)
-                    _ax_sim.legend(frameon=False, loc="lower right")
+                    _combined = (_hist_cur if _hist_cand is None
+                                 else np.concatenate((_hist_cur, _hist_cand)))
+                    _combined = _combined[np.isfinite(_combined)]
+                    _hist_edges = np.histogram_bin_edges(_combined, bins=24)
+                    _hist_centers = (_hist_edges[:-1] + _hist_edges[1:]) / 2
+                    _hist_widths = np.diff(_hist_edges)
+                    _fig_sim, _ax_sim = plt.subplots(figsize=(10, 4.5))
+                    _fig_sim.patch.set_facecolor("white")
+                    _ax_sim.set_facecolor("white")
+                    _cur_counts, _ = np.histogram(_hist_cur, bins=_hist_edges)
+                    if _hist_cand is not None:
+                        _cand_counts, _ = np.histogram(_hist_cand, bins=_hist_edges)
+                        _ax_sim.bar(_hist_centers - _hist_widths * 0.21, _cur_counts,
+                                    width=_hist_widths * 0.40, color="#467FA7",
+                                    edgecolor="white", linewidth=0.6,
+                                    label="Current LAB range", zorder=3)
+                        _ax_sim.bar(_hist_centers + _hist_widths * 0.21, _cand_counts,
+                                    width=_hist_widths * 0.40, color="#E5A16B",
+                                    edgecolor="white", linewidth=0.6,
+                                    label="Candidate LAB range", zorder=3)
+                    else:
+                        _ax_sim.bar(_hist_centers, _cur_counts,
+                                    width=_hist_widths * 0.86, color="#467FA7",
+                                    edgecolor="white", linewidth=0.6,
+                                    label="Current LAB range", zorder=3)
+                    _ax_sim.axvline(_spec_line, linestyle="--", color="#B33A37",
+                                    linewidth=2, label=f"LINE ΔE* limit = {fmt_num_trim(_spec_line)}",
+                                    zorder=4)
+                    _ax_sim.set_xlabel("Simulated LINE ΔE* (CIE76)", fontsize=11)
+                    _ax_sim.set_ylabel("Simulation count", fontsize=11)
+                    _ax_sim.set_xlim(left=max(0, _hist_edges[0] - _hist_widths[0] / 2),
+                                     right=max(_hist_edges[-1] + _hist_widths[-1] / 2,
+                                               _spec_line + _hist_widths[-1]))
+                    _ax_sim.set_ylim(bottom=0)
+                    _ax_sim.grid(axis="y", color="#DFE5EB", linewidth=0.7)
+                    _ax_sim.set_axisbelow(True)
+                    _ax_sim.spines["top"].set_visible(False)
+                    _ax_sim.spines["right"].set_visible(False)
+                    _ax_sim.legend(loc="upper right", frameon=False, fontsize=9)
+                    _fig_sim.tight_layout()
                     st.pyplot(_fig_sim, use_container_width=True)
                     plt.close(_fig_sim)
-                    st.caption("曲線表示模擬 LINE ΔE* 的累積分布；曲線越靠左代表風險越低。紅色虛線為 ΔE* 規格上限。")
+                    st.caption(
+                        "每組柱狀圖代表相同的 ΔE* 區間；藍色為現行 LAB 範圍，橘色為候選範圍。"
+                        "紅色虛線為產出規格上限；右側柱狀圖越少，代表模擬超標情境越少。"
+                    )
 
                     with st.expander("📋 查看計算公式、情境明細與歷史 Shift", expanded=False):
                         st.caption(
