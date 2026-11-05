@@ -1859,13 +1859,14 @@ elif app_mode == "🎛️ Control Limit Calculator":
             # Do not reuse those incomplete session-state dictionaries.
             _cache_key = "task3_selected_color_validation_export"
             _required_payload_keys = {
-                "signature", "result", "components", "proposal",
-                "comparison", "proposal_note", "bytes", "payload_version",
+                "signature", "result", "proof", "proof_summary",
+                "components", "proposal", "comparison", "proposal_note",
+                "bytes", "payload_version",
             }
             _previous_result = st.session_state.get(_cache_key)
             if (
                 not isinstance(_previous_result, dict)
-                or _previous_result.get("payload_version") != 2
+                or _previous_result.get("payload_version") != 3
                 or not _required_payload_keys.issubset(_previous_result)
                 or _previous_result.get("signature") != _signature
             ):
@@ -2048,6 +2049,38 @@ elif app_mode == "🎛️ Control Limit Calculator":
                         {"評估項目": "評估結果", "結果": _status},
                     ])
                     _shift_df = pd.DataFrame(_shift_stats)
+                    # Transparent calculation table for management report:
+                    # every value comes from the SAME current-color/current-K
+                    # LAB limits and historical paired-batch shift extrema.
+                    _by_factor = {r["Factor"]: r for r in _shift_stats}
+                    _proof_rows = [
+                        ("LAB LCL", "LAB LCL"),
+                        ("LAB UCL", "LAB UCL"),
+                        ("Shift Min (LINE − LAB)", "Shift Min"),
+                        ("Shift Max (LINE − LAB)", "Shift Max"),
+                        ("LINE Min = LAB LCL + Shift Min", "LINE envelope min"),
+                        ("LINE Max = LAB UCL + Shift Max", "LINE envelope max"),
+                        ("Max Abs LINE = max(|LINE Min|, |LINE Max|)", "Max abs LINE"),
+                    ]
+                    _proof_df = pd.DataFrame([
+                        {"Calculation": label, **{
+                            delta_label(_f): float(_by_factor[delta_label(_f)][key])
+                            for _f in factors
+                        }}
+                        for label, key in _proof_rows
+                    ])
+                    _proof_df.loc[len(_proof_df)] = {
+                        "Calculation": "Squared Max Abs LINE",
+                        **{delta_label(_f): float(_by_factor[delta_label(_f)]["Max abs LINE"]) ** 2
+                           for _f in factors},
+                    }
+                    _proof_summary = pd.DataFrame([
+                        {"Item": "Worst-case LINE ΔE* = √(Σ Max Abs LINE²)",
+                         "Value": _worst},
+                        {"Item": "LINE ΔE* specification", "Value": float(_spec)},
+                        {"Item": "Safety margin = Spec − Worst-case ΔE*",
+                         "Value": _margin},
+                    ])
                     _notes = pd.DataFrame([
                         {"項目": "Data scope", "說明": "Selected color and active year/month filters only"},
                         {"項目": "LAB limits", "說明": "Current Task 3 calculated LCL/UCL using selected k"},
@@ -2063,6 +2096,8 @@ elif app_mode == "🎛️ Control Limit Calculator":
                         _result.to_excel(_writer, sheet_name="Verification_Summary", index=False)
                         _limits.to_excel(_writer, sheet_name="Current_LAB_Limits", index=False)
                         _shift_df.to_excel(_writer, sheet_name="Shift_Calculation", index=False)
+                        _proof_df.to_excel(_writer, sheet_name="Worst_Case_Proof", index=False)
+                        _proof_summary.to_excel(_writer, sheet_name="Proof_Summary", index=False)
                         _component_df.to_excel(_writer, sheet_name="Component_Contribution", index=False)
                         _proposal_df.to_excel(_writer, sheet_name="Candidate_LAB_Limits", index=False)
                         _comparison_df.to_excel(_writer, sheet_name="Current_vs_Candidate", index=False)
@@ -2082,8 +2117,10 @@ elif app_mode == "🎛️ Control Limit Calculator":
                                 _ws.column_dimensions[_letter].width = min(max(_max_len + 2, 12), 42)
                     st.session_state[_cache_key] = {
                         "signature": _signature,
-                        "payload_version": 2,
+                        "payload_version": 3,
                         "result": _result,
+                        "proof": _proof_df,
+                        "proof_summary": _proof_summary,
                         "components": _component_df,
                         "proposal": _proposal_df,
                         "comparison": _comparison_df,
@@ -2094,11 +2131,26 @@ elif app_mode == "🎛️ Control Limit Calculator":
             _saved = st.session_state.get(_cache_key)
             if (
                 isinstance(_saved, dict)
-                and _saved.get("payload_version") == 2
+                and _saved.get("payload_version") == 3
                 and _required_payload_keys.issubset(_saved)
                 and _saved.get("signature") == _signature
             ):
                 st.dataframe(_saved["result"], hide_index=True, use_container_width=True)
+                st.markdown("#### 最大推估 LINE ΔE* 計算明細（報告佐證表）")
+                st.caption(
+                    "依目前所選色號、方法及 k 值的 LAB 界限，搭配完整配對批次的歷史 Shift Min/Max。"
+                    "本表可直接下載至 Excel，數值未提前四捨五入參與計算。"
+                )
+                st.dataframe(
+                    _saved["proof"].style.format({
+                        "ΔL*": "{:.4f}", "Δa*": "{:.4f}", "Δb*": "{:.4f}",
+                    }),
+                    hide_index=True, use_container_width=True,
+                )
+                st.dataframe(
+                    _saved["proof_summary"].style.format({"Value": "{:.4f}"}),
+                    hide_index=True, use_container_width=True,
+                )
                 st.markdown("#### Worst-case ΔE* Component Contribution")
                 st.dataframe(_saved["components"].style.format({
                     "Worst LINE Component": "{:.4f}",
