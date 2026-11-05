@@ -18,66 +18,104 @@ from datetime import datetime
 # historical eligible LAB mean included. No arbitrary shrink %.
 # =============================================================
 def propose_lab_box(iqr_lcl, iqr_ucl, historical_lab, lab_spec=0.50):
-    """Return a large-volume candidate LAB box, or (None, reason).
+    """Propose an IQR-contained rectangular LAB region without SciPy.
 
-    The optimized box must lie within the three IQR bounds and the
-    LAB CIE76 sphere, and contain the mean of eligible historical LAB.
-    It is an exploratory design choice, NOT a statistical confidence
-    interval nor a guarantee of LINE conformity.
+    Maximize the log-volume of an axis-aligned LAB box, containing the
+    historical accepted LAB mean, subject to the entire box satisfying
+    CIE76 LAB Delta E <= lab_spec. Only NumPy is used.
+
+    Let m_j=max(abs(LCL_j), abs(UCL_j)). For a fixed m_j, the widest
+    possible box is [max(IQR_LCL_j,-m_j), min(IQR_UCL_j,m_j)]. Therefore
+    the 6-bound problem reduces to three nonnegative m_j values with
+    sum(m_j**2)<=lab_spec**2. A common Lagrange multiplier and bisection
+    solve the concave log-width problem. This is NOT an LINE-risk optimum.
     """
-    from scipy.optimize import minimize
     low = np.asarray(iqr_lcl, dtype=float)
     high = np.asarray(iqr_ucl, dtype=float)
     hist = np.asarray(historical_lab, dtype=float).reshape(-1, 3)
     hist = hist[np.isfinite(hist).all(axis=1)]
+    if low.shape != (3,) or high.shape != (3,) or not np.isfinite(low).all() or not np.isfinite(high).all():
+        return None, 'IQR 界限缺失或含無效數值。'
+    if np.any(high <= low):
+        return None, 'IQR 界限無有效區間。'
+    if not np.isfinite(lab_spec) or lab_spec <= 0:
+        return None, 'LAB ΔE* 規格必須大於零。'
     if len(hist) == 0:
         return None, '沒有 IQR 範圍內且 LAB ΔE* ≤ 0.50 的歷史批次，無法確定數據中心。'
-    center = hist.mean(axis=0)  # convex mean of valid points
-    if np.linalg.norm(center) >= lab_spec - 1e-8:
+    center = hist.mean(axis=0)
+    if np.linalg.norm(center) >= lab_spec - 1e-9:
         return None, '歷史 LAB 中心太接近規格邊界，無法建立正寬度三因子界限。'
     if np.any(center < low - 1e-9) or np.any(center > high + 1e-9):
         return None, '歷史 LAB 中心不在目前 IQR 界限內。'
 
-    # Start with a tiny feasible box around the historical center.
-    margin = (lab_spec - np.linalg.norm(center)) / (3.0 ** 0.5)
-    distance = np.minimum(center - low, high - center)
-    # If center exactly touches a bound, expand only toward the other side.
-    eps = min(float(margin) * 0.15, float(np.min(high - low)) * 0.04)
-    if eps < 1e-7:
-        return None, 'IQR 區間過窄，無法進行建議範圍估算。'
-    init_low = np.maximum(low, center - eps)
-    init_high = np.minimum(high, center + eps)
-    if np.any(init_high <= init_low):
-        return None, '初始候選區間沒有有效寬度。'
-    x0 = np.concatenate([init_low, init_high])
-    def volume_objective(x):
-        widths = x[3:] - x[:3]
-        if np.any(widths <= 0):
-            return 1e9 + float(np.abs(widths[widths <= 0]).sum()) * 1e9
-        return -float(np.log(widths).sum())
-    def lab_sphere_constraint(x):
-        extremes = np.maximum(np.abs(x[:3]), np.abs(x[3:]))
-        return float(lab_spec ** 2 - extremes @ extremes)
-    cons = [
-        {'type': 'ineq', 'fun': lab_sphere_constraint},
-        {'type': 'ineq', 'fun': lambda x: x[3:] - x[:3] - 1e-7},
-    ]
-    bounds = [(float(low[i]), float(center[i])) for i in range(3)] + [
-        (float(center[i]), float(high[i])) for i in range(3)
-    ]
-    res = minimize(volume_objective, x0, method='SLSQP', bounds=bounds,
-                   constraints=cons, options={'maxiter': 600, 'ftol': 1e-11})
-    if (not res.success or not np.isfinite(res.x).all()
-        or lab_sphere_constraint(res.x) < -1e-8
-        or np.any(res.x[3:] - res.x[:3] <= 0)):
-        return None, '最大區間體積求解未收斂；不輸出未驗證的建議 LCL/UCL。'
-    raw_lo, raw_hi = res.x[:3], res.x[3:]
-    # Conservative rounding for an operations table with two decimals:
-    # round LCL UP and UCL DOWN so displayed limits never widen the safe box.
+    # To contain center, every maximum absolute component must be >= |center|.
+    min_m = np.abs(center)
+    max_m = np.maximum(np.abs(low), np.abs(high))
+
+    def width(i, m):
+        return max(0.0, min(float(high[i]), m) - max(float(low[i]), -m))
+
+    def best_m_at_penalty(i, penalty):
+        """Maximize log(width(m)) - penalty * m² on a bounded interval."""
+        left = float(min_m[i])
+        right = float(max_m[i])
+        if right - left <= 1e-13:
+            return right
+        # Golden section search: log(width(m)) is concave in m.
+        invphi = (5.0 ** 0.5 - 1.0) / 2.0
+        x1 = right - invphi * (right - left)
+        x2 = left + invphi * (right - left)
+        def objective(x):
+            w = width(i, x)
+            return (-1e100) if w <= 0 else math.log(w) - penalty * x * x
+        f1 = objective(x1)
+        f2 = objective(x2)
+        for _ in range(72):
+            if f1 < f2:
+                left = x1
+                x1, f1 = x2, f2
+                x2 = left + invphi * (right - left)
+                f2 = objective(x2)
+            else:
+                right = x2
+                x2, f2 = x1, f1
+                x1 = right - invphi * (right - left)
+                f1 = objective(x1)
+        return (left + right) * 0.5
+
+    if float(max_m @ max_m) <= lab_spec ** 2 + 1e-12:
+        radii = max_m.copy()
+    else:
+        # As the penalty rises, the squared radius decreases monotonically.
+        penalty_lo, penalty_hi = 0.0, 1.0
+        for _ in range(100):
+            radii = np.array([best_m_at_penalty(i, penalty_hi) for i in range(3)])
+            if float(radii @ radii) <= lab_spec ** 2:
+                break
+            penalty_hi *= 2.0
+        else:
+            return None, '無法找到符合 LAB ΔE* 規格的候選區間。'
+        for _ in range(60):
+            midpoint = (penalty_lo + penalty_hi) / 2
+            trial = np.array([best_m_at_penalty(i, midpoint) for i in range(3)])
+            if float(trial @ trial) > lab_spec ** 2:
+                penalty_lo = midpoint
+            else:
+                penalty_hi = midpoint
+                radii = trial
+
+    raw_lo = np.maximum(low, -radii)
+    raw_hi = np.minimum(high, radii)
+    if np.any(raw_hi <= raw_lo + 1e-10):
+        return None, '找不到同時包含歷史 LAB 中心的有效數值區間。'
+
+    # Operations tables use 2 decimals: inward rounding cannot widen the box.
     cand_lo = np.ceil(raw_lo * 100 - 1e-9) / 100
     cand_hi = np.floor(raw_hi * 100 + 1e-9) / 100
     if np.any(cand_hi <= cand_lo):
         return None, '界限保守取至小數兩位後區間過窄，無法建立有效三項建議界限。'
+    if np.any(center < cand_lo - 1e-10) or np.any(center > cand_hi + 1e-10):
+        return None, '取至小數兩位後無法保留歷史 LAB 中心；請檢視數據與界限。'
     worst_lab = float(np.linalg.norm(np.maximum(np.abs(cand_lo), np.abs(cand_hi))))
     if worst_lab > lab_spec + 1e-10:
         return None, '候選界限小數兩位取值後未通過 LAB ΔE* 驗證。'
