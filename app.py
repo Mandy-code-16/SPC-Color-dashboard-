@@ -1879,14 +1879,23 @@ elif app_mode == "🎛️ Control Limit Calculator":
             st.dataframe(_table_iqr, hide_index=True, use_container_width=True)
             _iqr_a, _iqr_b, _iqr_c = st.columns(3)
             _iqr_a.metric("IQR 範圍最大 LAB ΔE*", fmt_num_trim(_box_max_de))
-            _iqr_b.metric("LAB 入料標準", "≤ 0.5")
-            _iqr_c.metric("IQR 全區間判定", "符合" if _iqr_guarantees_lab else "部分組合可能超標")
+            _iqr_b.metric("LAB 入料標準", "≤ 0.50")
+            _iqr_c.metric("IQR 全區間判定", "符合" if _iqr_guarantees_lab else "未全面符合")
             st.caption("計算：√[max(|ΔL LCL|, |ΔL UCL|)² + max(|Δa LCL|, |Δa UCL|)² + max(|Δb LCL|, |Δb UCL|)²]。")
             if not _iqr_guarantees_lab:
-                st.info("IQR 分別限制三個因子，不能單獨保證總 LAB ΔE* ≤ 0.50。模擬時將額外限制 LAB ΔE* ≤ 0.50，不修改 IQR 計算結果。")
+                st.warning(
+                    "目前 IQR 界限含有 LAB ΔE* > 0.50 的可能組合，不能單靠三個 IQR 界限判定入料合格。"
+                    "實際 LAB 應同時符合三項 IQR 界限與總 ΔE* ≤ 0.50；IQR 計算本身維持不變。"
+                )
+            _iqr_and_lab_ng = int(np.sum(_hist_iqr_mask & ~_hist_lab_pass))
             st.caption(
-                f"歷史配對 {len(_risk_pairs)} 批；IQR 內 {int(_hist_iqr_mask.sum())} 批；"
-                f"IQR 內且 LAB ΔE* ≤ 0.50：{int(_hist_accepted.sum())} 批。"
+                f"有效歷史配對：{len(_risk_pairs)} 批；IQR 範圍內：{int(_hist_iqr_mask.sum())} 批；"
+                f"其中 LAB ΔE* ≤ 0.50：{int(_hist_accepted.sum())} 批、LAB ΔE* > 0.50：{_iqr_and_lab_ng} 批。"
+            )
+            _hist_line_ng_accepted = int(np.sum(_hist_accepted & ~_hist_line_pass))
+            st.caption(
+                f"歷史 IQR 與 LAB 雙重合格批次中，LINE ΔE* > 1.00：{_hist_line_ng_accepted} 批。"
+                "LINE 只用總 ΔE* 判定，不以單項 ΔL*、Δa*、Δb* 是否超出界限判定。"
             )
 
             st.markdown("### ② LAB 合格後，模擬 LINE ΔE* 是否 ≤ 1.00？")
@@ -2069,6 +2078,10 @@ elif app_mode == "🎛️ Control Limit Calculator":
                          "候選 LAB": fmt_percent_trim(_chosen["LAB 歷史接受率 (%)"]) if _chosen is not None else "—"},
                     ])
                     st.dataframe(_comparison, hide_index=True, use_container_width=True)
+                    st.caption(
+                        "說明：LAB ΔE* ≤ 0.50 為入料合格的必要條件；LINE ΔE* ≤ 1.00 為產出規格。"
+                        "模擬超標率來自歷史 Shift 重抽樣及 LAB 條件均勻抽樣，並非保證未來實際不良率。"
+                    )
                     st.markdown("### LINE ΔE* 模擬分布（Histogram）")
                     _v0 = _post_state["samples_current"]
                     _v1 = _post_state["samples_candidate"]
