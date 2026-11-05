@@ -2056,20 +2056,28 @@ elif app_mode == "🎛️ Control Limit Calculator":
                     '初步建議 UCL': [fmt_num_trim(x) for x in _candidate_u],
                     '計算依據': ['歷史合格 LAB 平均中心 + 最大區間體積，受 IQR 與 LAB ΔE* ≤ 0.50 限制'] * 3,
                 })
-                st.dataframe(_proposal_table, hide_index=True, use_container_width=True)
+                st.dataframe(_proposal_table.drop(columns=["計算依據"], errors="ignore"),
+                             hide_index=True, use_container_width=True)
                 st.markdown("#### ③-1 歷史批次如何選用（計算中心之依據）")
                 st.caption(
                     "只選擇三項 LAB 同時落在現行 IQR 界限內，且 LAB ΔE* ≤ 0.50 的完整配對批次；"
                     "LINE 是否超過 1.00 不影響此處 LAB 中心之選樣，LINE 將於步驟 4 獨立驗證。"
                 )
-                _audit_display = _audit_detail.copy()
-                for _col in ["LAB_ΔL", "LAB_Δa", "LAB_Δb", "LAB ΔE*", "LINE ΔE*"]:
+                # Display only the decision-relevant batch columns onscreen.
+                # Full 12-column audit remains in the downloadable Excel.
+                _audit_display = _audit_detail[["製造批號", "LAB_ΔL", "LAB_Δa", "LAB_Δb",
+                                                "LAB ΔE*", "用於參考中心", "未選用原因"]].copy()
+                _audit_display = _audit_display.rename(columns={
+                    "製造批號": "製造批號", "LAB_ΔL": "LAB ΔL*", "LAB_Δa": "LAB Δa*",
+                    "LAB_Δb": "LAB Δb*", "用於參考中心": "採用", "未選用原因": "未採用原因"})
+                for _col in ["LAB ΔL*", "LAB Δa*", "LAB Δb*", "LAB ΔE*"]:
                     _audit_display[_col] = _audit_display[_col].map(fmt_num_trim)
-                for _col in ["IQR 範圍內", "LAB ΔE* ≤ 0.50", "用於參考中心", "LINE 超標"]:
-                    _audit_display[_col] = _audit_display[_col].map({True: "是", False: "否"})
-                st.dataframe(_audit_display, hide_index=True, use_container_width=True)
+                _audit_display["採用"] = _audit_display["採用"].map({True: "是", False: "否"})
+                st.dataframe(_audit_display, hide_index=True, use_container_width=True,
+                             column_config={"製造批號": st.column_config.TextColumn("製造批號", width="medium"),
+                                            "未採用原因": st.column_config.TextColumn("未採用原因", width="medium")})
                 st.caption(f"用於參考中心：{_n_lab} / {_n_pair} 批；參考中心 = 各合格批之 LAB ΔL*、Δa*、Δb* 分別取平均。")
-                st.markdown("#### ③-2 建議 LCL/UCL 逐項推導（含未四捨五入數值）")
+                st.markdown("#### ③-2 建議 LCL/UCL 計算明細")
                 _calculation_rows = []
                 for _j, _factor_name in enumerate(("ΔL*", "Δa*", "Δb*")):
                     _rj = float(_candidate['radius'][_j])
@@ -2087,13 +2095,34 @@ elif app_mode == "🎛️ Control Limit Calculator":
                         "最大絕對值 = max(|LCL|, |UCL|)": float(max(abs(_candidate_l[_j]), abs(_candidate_u[_j]))),
                     })
                 _audit_formula_df = pd.DataFrame(_calculation_rows)
-                _audit_formula_display = _audit_formula_df.copy()
-                for _col in _audit_formula_display.columns[1:]:
-                    # Show 4 decimals here to make intermediate bounds traceable;
-                    # the final operational limits remain at two decimals.
-                    _audit_formula_display[_col] = _audit_formula_display[_col].map(
-                        lambda _x: f"{_x:.6f}".rstrip('0').rstrip('.') if np.isfinite(_x) else "—")
-                st.dataframe(_audit_formula_display, hide_index=True, use_container_width=True)
+                # Transpose the wide audit table to prevent long headers from
+                # producing vertical, single-character text on narrow screens.
+                _audit_items = [
+                    ("IQR LCL", "IQR LCL"),
+                    ("IQR UCL", "IQR UCL"),
+                    ("歷史 LAB 參考中心", "歷史合格 LAB 中心"),
+                    ("最大絕對值 M", "最適最大絕對值 M"),
+                    ("未取位 LCL", "未取位 LCL = max(IQR LCL, −M)"),
+                    ("未取位 UCL", "未取位 UCL = min(IQR UCL, M)"),
+                    ("建議 LCL", "建議 LCL = ceil(原值×100)/100"),
+                    ("建議 UCL", "建議 UCL = floor(原值×100)/100"),
+                    ("建議區間寬度", "建議區間寬度 = UCL−LCL"),
+                    ("最大絕對值", "最大絕對值 = max(|LCL|, |UCL|)"),
+                ]
+                _audit_formula_display = pd.DataFrame({
+                    "計算項目": [item[0] for item in _audit_items],
+                    **{factor: [fmt_num_trim(_audit_formula_df.iloc[j][key])
+                                for _, key in _audit_items]
+                       for j, factor in enumerate(("ΔL*", "Δa*", "Δb*"))}
+                })
+                st.dataframe(_audit_formula_display, hide_index=True, use_container_width=True,
+                             column_config={"計算項目": st.column_config.TextColumn("計算項目", width="medium"),
+                                            "ΔL*": st.column_config.TextColumn("ΔL*", width="small"),
+                                            "Δa*": st.column_config.TextColumn("Δa*", width="small"),
+                                            "Δb*": st.column_config.TextColumn("Δb*", width="small")})
+                st.caption("公式：M 為最佳化的最大絕對值；未取位 LCL = max(IQR LCL, −M)；"
+                           "未取位 UCL = min(IQR UCL, M)；建議 LCL 向內進位、UCL 向內捨去至小數兩位。")
+                st.caption("畫面為最多兩位小數；Excel 仍保留未取位原始數值，供計算查核。")
                 st.caption(
                     "推導：先透過最大區間體積求出 M_L、M_a、M_b（M_L² + M_a² + M_b² ≤ 0.50²）；"
                     "再套用 LCL = max(IQR LCL, −M)、UCL = min(IQR UCL, M)。"
