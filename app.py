@@ -2006,7 +2006,10 @@ elif app_mode == "🎛️ Control Limit Calculator":
             _shift_mat = _line_mat - _lab_mat
             _lab_de = np.linalg.norm(_lab_mat, axis=1)
             _line_de = np.linalg.norm(_line_mat, axis=1)
-            _inside_box = np.all((_lab_mat >= _lo_post) & (_lab_mat <= _hi_post), axis=1)
+            # Recompute eligibility directly from THIS RUN's exact IQR limits.
+            # Per-factor masks are kept for auditing why a batch is rejected.
+            _factor_within_iqr = (_lab_mat >= _lo_post[None, :]) & (_lab_mat <= _hi_post[None, :])
+            _inside_box = np.all(_factor_within_iqr, axis=1)
             _eligible_lab = _inside_box & (_lab_de <= _lab_spec_post)
             _hist_post["LAB ΔE*"] = _lab_de
             _hist_post["LINE ΔE*"] = _line_de
@@ -2031,10 +2034,20 @@ elif app_mode == "🎛️ Control Limit Calculator":
                                       "LAB ΔE*", "LINE ΔE*", "IQR 範圍內", "LAB 接受", "LINE 超標"]].copy()
             _audit_batch["LAB ΔE* ≤ 0.50"] = _lab_de <= _lab_spec_post
             _audit_batch["用於參考中心"] = _eligible_lab
-            _audit_batch["未選用原因"] = np.where(~_inside_box, "超出 IQR 界限",
-                                                   np.where(_lab_de > _lab_spec_post, "LAB ΔE* > 0.50", "—"))
+            for _j, _f in enumerate(_factors_post):
+                _audit_batch[f"{_f} IQR判定"] = _factor_within_iqr[:, _j]
+            _audit_batch["未選用原因"] = [
+                "；".join(
+                    [f"{_f} 超出 IQR ({fmt_num_trim(_lab_mat[_i, _j])} 不在 "
+                     f"{fmt_num_trim(_lo_post[_j])}~{fmt_num_trim(_hi_post[_j])})"
+                     for _j, _f in enumerate(_factors_post) if not _factor_within_iqr[_i, _j]]
+                    + (["LAB ΔE* > 0.50"] if _lab_de[_i] > _lab_spec_post else [])
+                ) or "—"
+                for _i in range(len(_lab_mat))
+            ]
             # LINE NG must NOT disqualify a batch from the LAB reference center.
             _audit_detail = _audit_batch[["製造批號", "Time", "LAB_ΔL", "LAB_Δa", "LAB_Δb",
+                                          "ΔL IQR判定", "Δa IQR判定", "Δb IQR判定",
                                           "LAB ΔE*", "IQR 範圍內", "LAB ΔE* ≤ 0.50",
                                           "用於參考中心", "未選用原因", "LINE ΔE*", "LINE 超標"]].copy()
             st.markdown("### 步驟 3｜歷史數據導向之 LAB 數值範圍建議")
@@ -2073,9 +2086,17 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 for _col in ["LAB ΔL*", "LAB Δa*", "LAB Δb*", "LAB ΔE*"]:
                     _audit_display[_col] = _audit_display[_col].map(fmt_num_trim)
                 _audit_display["採用"] = _audit_display["採用"].map({True: "是", False: "否"})
+                st.caption(
+                    "本表直接使用上方 IQR 即時計算結果（未取位原值）判定；"
+                    + "；".join(
+                        f"{_f}: k={fmt_num_trim(calc_res[_f]['iqr_k'])}，"
+                        f"LCL={fmt_num_trim(_lo_post[_j])}，UCL={fmt_num_trim(_hi_post[_j])}"
+                        for _j, _f in enumerate(_factors_post)
+                    )
+                )
                 st.dataframe(_audit_display, hide_index=True, use_container_width=True,
                              column_config={"製造批號": st.column_config.TextColumn("製造批號", width="medium"),
-                                            "未採用原因": st.column_config.TextColumn("未採用原因", width="medium")})
+                                            "未採用原因": st.column_config.TextColumn("未採用原因", width="large")})
                 st.caption(f"用於參考中心：{_n_lab} / {_n_pair} 批；參考中心 = 各合格批之 LAB ΔL*、Δa*、Δb* 分別取平均。")
                 st.markdown("#### ③-2 建議 LCL/UCL 計算明細")
                 _calculation_rows = []
