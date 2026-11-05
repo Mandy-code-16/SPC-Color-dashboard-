@@ -2147,8 +2147,10 @@ elif app_mode == "🎛️ Control Limit Calculator":
                         _ws.freeze_panes = "A2"
                         _ws.auto_filter.ref = _ws.dimensions
                         for _col_cells in _ws.columns:
-                            _col_cells[0].column_letter
-                            _ws.column_dimensions[_col_cells[0].column_letter].width = min(45, max(14, len(str(_col_cells[0].value or ""))+3))
+                            # Do not leave a bare expression here: Streamlit magic
+                            # would render A, B, C ... as separate lines on screen.
+                            _column_letter = _col_cells[0].column_letter
+                            _ws.column_dimensions[_column_letter].width = min(45, max(14, len(str(_col_cells[0].value or ""))+3))
                         for _row in _ws.iter_rows(min_row=2):
                             for _cell in _row:
                                 if isinstance(_cell.value, (float, np.floating)):
