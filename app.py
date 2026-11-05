@@ -1851,7 +1851,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
         }
         method_rows = []
         detailed = {}
-        st.markdown("### 2. LINE ΔE* risk conditional on LAB limits / 條件風險")
+        st.markdown("### 2. Define LAB acceptance windows / LAB 三項同時合格條件")
         for _method, (_lo_key, _hi_key) in candidate_methods.items():
             _valid = all(
                 calc_res[_f].get(_lo_key) is not None
@@ -1899,6 +1899,126 @@ elif app_mode == "🎛️ Control Limit Calculator":
             })
             detailed[_method] = (_accept, _accepted)
 
+        # ---------------------------------------------------------
+        # SHIFT ENVELOPE / HISTORICAL WORST-CASE VALIDATION (NEW)
+        # This is a deterministic stress test, NOT a probability forecast.
+        # Original Task 3 charts and limit calculations stay unchanged.
+        # ---------------------------------------------------------
+        st.markdown("### 3. LAB–LINE Shift Worst-case Check / 偏移最不利情境驗證")
+        st.caption(
+            "以歷史 LINE−LAB 偏移最小值／最大值，搭配 LAB 各因子之 LCL／UCL，"
+            "計算可能的最不利 LINE ΔE*。此為歷史偏移範圍情境分析，不是未來保證或失敗機率。"
+        )
+        shift_envelopes = {}
+        for _factor in factors:
+            _shift_values = pd.to_numeric(risk_pairs[f"Shift_{_factor}"], errors="coerce").dropna()
+            if len(_shift_values):
+                shift_envelopes[_factor] = (float(_shift_values.min()), float(_shift_values.max()))
+
+        worst_rows = []
+        component_details = []
+        for _method, (_lo_key, _hi_key) in candidate_methods.items():
+            _valid = bool(len(risk_pairs)) and len(shift_envelopes) == 3 and all(
+                calc_res[_factor].get(_lo_key) is not None
+                and calc_res[_factor].get(_hi_key) is not None
+                and np.isfinite(calc_res[_factor][_lo_key])
+                and np.isfinite(calc_res[_factor][_hi_key])
+                and calc_res[_factor][_lo_key] <= calc_res[_factor][_hi_key]
+                for _factor in factors
+            )
+            if not _valid:
+                worst_rows.append({
+                    "Method": _method,
+                    "Historical shift-vector worst ΔE*": np.nan,
+                    "Component envelope worst ΔE*": np.nan,
+                    "Margin to spec": np.nan,
+                    "Shift scenario check": "Not evaluable",
+                })
+                continue
+
+            _component_max_abs = []
+            _lo_vec, _hi_vec = [], []
+            for _factor in factors:
+                _lcl = float(calc_res[_factor][_lo_key])
+                _ucl = float(calc_res[_factor][_hi_key])
+                _shift_min, _shift_max = shift_envelopes[_factor]
+                # All 4 endpoints: LCL/UCL + min/max historical shift.
+                _candidates = (_lcl + _shift_min, _lcl + _shift_max,
+                               _ucl + _shift_min, _ucl + _shift_max)
+                _max_abs = max(abs(v) for v in _candidates)
+                _component_max_abs.append(_max_abs)
+                _lo_vec.append(_lcl)
+                _hi_vec.append(_ucl)
+                component_details.append({
+                    "Method": _method,
+                    "Factor": delta_label(_factor),
+                    "LAB LCL": _lcl, "LAB UCL": _ucl,
+                    "Shift min": _shift_min, "Shift max": _shift_max,
+                    "Worst |LINE component|": _max_abs,
+                })
+
+            # Conservative rectangle: independent extremes from different historical
+            # batches may be combined. Appropriate as a stress envelope, not a prediction.
+            _envelope_de = float(np.linalg.norm(_component_max_abs))
+
+            # Coherent historical vectors: keep each batch's three shifts together.
+            # For a fixed shift vector, max Euclidean norm over a LAB box occurs at a corner.
+            _shift_vectors = risk_pairs[[f"Shift_{_factor}" for _factor in factors]].to_numpy(dtype=float)
+            _corners = np.array([
+                [a, b, c]
+                for a in (_lo_vec[0], _hi_vec[0])
+                for b in (_lo_vec[1], _hi_vec[1])
+                for c in (_lo_vec[2], _hi_vec[2])
+            ], dtype=float)
+            _shift_de = np.sqrt(np.sum(
+                (_shift_vectors[:, None, :] + _corners[None, :, :]) ** 2, axis=2
+            ))
+            _observed_vector_worst = float(np.max(_shift_de))
+            _margin = float(output_de_threshold - _envelope_de)
+            _status = "Within historical shift envelope" if _margin >= 0 else "Potential exceedance"
+            worst_rows.append({
+                "Method": _method,
+                "Historical shift-vector worst ΔE*": _observed_vector_worst,
+                "Component envelope worst ΔE*": _envelope_de,
+                "Margin to spec": _margin,
+                "Shift scenario check": _status,
+            })
+
+        worst_comparison = pd.DataFrame(worst_rows)
+        st.dataframe(
+            worst_comparison.style.format({
+                "Historical shift-vector worst ΔE*": "{:.3f}",
+                "Component envelope worst ΔE*": "{:.3f}",
+                "Margin to spec": "{:+.3f}",
+            }, na_rep="—"),
+            use_container_width=True, hide_index=True,
+        )
+        st.caption(
+            "Historical shift-vector: giữ nguyên bộ 3 Shift của từng batch; "
+            "Component envelope: kết hợp Shift min/max của từng yếu tố, có thể đến từ các batch khác nhau "
+            "nên bảo thủ hơn. Margin = ΔE* spec − Component envelope. "
+            "Bằng giới hạn 1.00 là đạt; chỉ giá trị > 1.00 mới vượt."
+        )
+        if len(risk_pairs) < 30:
+            st.warning(
+                f"⚠️ Chỉ có {len(risk_pairs)} batch ghép đủ 3 yếu tố: khoảng Shift lịch sử "
+                "có thể chưa bao phủ các biến động tương lai. Chưa đủ cơ sở để xác nhận độ an toàn của giới hạn LAB."
+            )
+        else:
+            st.info(
+                "Shift envelope chỉ là kiểm tra tình huống dựa trên dữ liệu lịch sử. "
+                "Cần tiếp tục xác nhận bằng các batch sản xuất mới, nhất là sát giới hạn LAB."
+            )
+        with st.expander("📋 LAB limit + Shift endpoints for each method / 計算明細"):
+            st.dataframe(
+                pd.DataFrame(component_details).style.format({
+                    "LAB LCL": "{:.3f}", "LAB UCL": "{:.3f}",
+                    "Shift min": "{:.3f}", "Shift max": "{:.3f}",
+                    "Worst |LINE component|": "{:.3f}",
+                }, na_rep="—"), hide_index=True, use_container_width=True,
+            )
+
+        st.markdown("### 4. Observed Failure Rate / 實際超標率")
         risk_comparison = pd.DataFrame(method_rows)
         st.dataframe(risk_comparison.style.format({
             "Observed risk (%)": "{:.2f}", "Upper risk 95% (%)": "{:.2f}",
@@ -1920,7 +2040,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 "由相同資料計算入料界限及驗證風險可能產生樂觀偏差；建議另以新批次進行驗證。"
             )
 
-        st.markdown("### 3. Paired batch verification / 逐批驗證")
+        st.markdown("### 5. Paired batch verification / 逐批驗證")
         selected_method = st.selectbox(
             "Select incoming LAB limit method", list(detailed.keys()),
             key="task3_risk_method",
@@ -1960,6 +2080,8 @@ elif app_mode == "🎛️ Control Limit Calculator":
             output_buf = io.BytesIO()
             with pd.ExcelWriter(output_buf, engine="openpyxl") as w:
                 risk_comparison.to_excel(w, sheet_name="Method_Risk_Comparison", index=False)
+                worst_comparison.to_excel(w, sheet_name="Shift_Worst_Case", index=False)
+                pd.DataFrame(component_details).to_excel(w, sheet_name="Shift_Endpoint_Detail", index=False)
                 pd.DataFrame(shift_rows).to_excel(w, sheet_name="LAB_LINE_Shift", index=False)
                 batch_view.to_excel(w, sheet_name="Paired_Batch_Check", index=False)
                 pd.DataFrame([
@@ -1967,7 +2089,8 @@ elif app_mode == "🎛️ Control Limit Calculator":
                     {"Setting": "Output DE specification", "Value": output_de_threshold},
                     {"Setting": "Selected LAB method", "Value": selected_method},
                     {"Setting": "LINE DE calculation", "Value": "CIE76 from paired LINE mean components"},
-                    {"Setting": "Caution", "Value": "In-sample exploratory validation; use new batches to confirm"},
+                    {"Setting": "Caution", "Value": "Worst-case is a historical shift-envelope stress test, NOT a probability or future guarantee"},
+                    {"Setting": "Data caution", "Value": "LAB limits may be derived from the same data; validate on later independent batches"},
                 ]).to_excel(w, sheet_name="Method_Notes", index=False)
             st.download_button(
                 "📥 Download LAB–LINE Output Risk (Excel)", output_buf.getvalue(),
