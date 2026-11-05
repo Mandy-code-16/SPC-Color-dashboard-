@@ -1790,132 +1790,187 @@ elif app_mode == "🎛️ Control Limit Calculator":
         )
 
     # ---------------------------------------------------------
-    # OPTIONAL REPORT TABLE 5 (CALCULATE ONLY ON BUTTON CLICK)
-    # No changes to existing figures, SPC calculations, or Task 3 charts.
+    # Selected-color-only LINE output verification (lightweight).
+    # Uses the ACTUAL LCL/UCL computed above from the current K inputs.
+    # No hardcoded color limits, no extra charts, no other colors processed.
     # ---------------------------------------------------------
-    with st.expander("📥 表5 LINE ΔE* 驗證 — Excel Export", expanded=False):
-        st.caption("僅於按下按鈕時分析四個色號；其餘功能及圖表保持不變。")
-        st.caption("依報告的最終 LAB 入料允收範圍計算，非重新使用未定案的 IQR/Standard 範圍。")
+    st.markdown("---")
+    st.markdown("### LAB 入料管制界限之 LINE 產出色差驗證")
+    st.caption("僅驗證目前選取的色號。入料界限直接取自本次 Task 3 計算結果；不套用其他色號的 k 值。")
 
-        def _make_table5_report(raw, spec=1.00):
-            # Report-final LAB limits (from supplied report, Table 5).
-            final_limits = {
-                "PK2E1230L": ((0.10, 0.45), (0.00, 0.40), (-0.10, 0.25)),
-                "PS2E123PS": ((-0.10, 0.20), (-0.10, 0.20), (-0.20, 0.10)),
-                "PS2U188TP": ((-0.10, 0.40), (-0.20, 0.10), (0.00, 0.30)),
-                "PT20428A1": ((-0.20, 0.20), (-0.20, 0.10), (-0.20, 0.30)),
-            }
-            factors = ("ΔL", "Δa", "Δb")
-            needed = ["塗料編號", "製造批號", "Time"] + [
-                c for f in factors for c in (f"入料檢測 {f} 正面", f"正-北 {f}", f"正-南 {f}")
-            ]
-            missing = [c for c in needed if c not in raw.columns]
-            if missing:
-                raise ValueError("Missing input columns: " + ", ".join(missing))
-            data = raw.loc[raw["塗料編號"].isin(final_limits), needed].copy()
-            for c in needed[3:]:
-                data[c] = pd.to_numeric(data[c], errors="coerce")
-            # Must preserve original SPC aggregation: mean(North,South) per row,
-            # then average per manufacturing batch, not average of all coil samples.
-            for f in factors:
-                data[f"LINE_{f}"] = data[[f"正-北 {f}", f"正-南 {f}"]].mean(axis=1)
-            aggs = {"Time": "min"}
-            aggs.update({f"入料檢測 {f} 正面": "mean" for f in factors})
-            aggs.update({f"LINE_{f}": "mean" for f in factors})
-            batch = data.groupby(["塗料編號", "製造批號"], as_index=False).agg(aggs)
-            for f in factors:
-                batch.rename(columns={f"入料檢測 {f} 正面": f"LAB_{f}"}, inplace=True)
-            complete_cols = [f"LAB_{f}" for f in factors] + [f"LINE_{f}" for f in factors]
-            batch = batch.dropna(subset=complete_cols).copy()
-            for f in factors:
-                batch[f"Shift_{f}"] = batch[f"LINE_{f}"] - batch[f"LAB_{f}"]
-            batch["LINE_ΔE"] = np.sqrt(sum(batch[f"LINE_{f}"] ** 2 for f in factors))
+    if len(calc_res) != 3 or paired_all.empty:
+        st.warning("目前色號缺少完整 ΔL*、Δa*、Δb* 的 LAB–LINE 配對資料。")
+    else:
+        # Display the current dynamic limits; leave the existing charts untouched.
+        _mode = st.selectbox(
+            "LAB limits to verify",
+            ["Recommended (intersection)", "IQR", "Standard Method"],
+            key="task3_current_color_verification_method",
+        )
+        _keys = {
+            "Recommended (intersection)": ("rec_lcl", "rec_ucl"),
+            "IQR": ("iqr_lcl", "iqr_ucl"),
+            "Standard Method": ("std_lcl", "std_ucl"),
+        }
+        _lk, _uk = _keys[_mode]
+        _limits_ok = all(
+            calc_res[_f].get(_lk) is not None
+            and calc_res[_f].get(_uk) is not None
+            and np.isfinite(calc_res[_f][_lk])
+            and np.isfinite(calc_res[_f][_uk])
+            and calc_res[_f][_lk] <= calc_res[_f][_uk]
+            for _f in factors
+        )
+        if not _limits_ok:
+            st.warning("目前所選方法在至少一項色差因子上沒有有效界限，無法進行驗證。")
+        else:
+            _limits = pd.DataFrame([
+                {
+                    "Factor": delta_label(_f),
+                    "Sigma K": calc_res[_f]["sig"],
+                    "IQR k": calc_res[_f]["iqr_k"],
+                    "LAB LCL": calc_res[_f][_lk],
+                    "LAB UCL": calc_res[_f][_uk],
+                }
+                for _f in factors
+            ])
+            st.dataframe(_limits.style.format({
+                "Sigma K": "{:.2f}", "IQR k": "{:.2f}",
+                "LAB LCL": "{:.3f}", "LAB UCL": "{:.3f}",
+            }), hide_index=True, use_container_width=True)
 
-            results = {}
-            shift_rows = []
-            for code, bounds in final_limits.items():
-                sub = batch.loc[batch["塗料編號"] == code].copy()
-                if sub.empty:
-                    results[code] = {"worst": None, "margin": None, "failure": None,
-                                     "status": "資料不足", "accepted": 0}
-                    continue
-                max_components = []
-                mask = pd.Series(True, index=sub.index)
-                for i, f in enumerate(factors):
-                    low, high = bounds[i]
-                    shift_min = float(sub[f"Shift_{f}"].min())
-                    shift_max = float(sub[f"Shift_{f}"].max())
-                    max_comp = max(abs(low + shift_min), abs(high + shift_max))
-                    max_components.append(max_comp)
-                    mask &= sub[f"LAB_{f}"].between(low, high, inclusive="both")
-                    shift_rows.append({"塗料編號": code, "因子": f,
-                                       "LAB_LCL": low, "LAB_UCL": high,
-                                       "Shift_Min": shift_min, "Shift_Max": shift_max,
-                                       "Worst_Abs_LINE": max_comp})
-                worst = float(np.sqrt(sum(v*v for v in max_components)))
-                accepted = sub.loc[mask]
-                fail_rate = (float((accepted["LINE_ΔE"] > spec).mean()) * 100
-                             if len(accepted) else None)
-                margin = spec - worst
-                if not len(accepted):
-                    status = "無LAB合格配對批次"
-                elif bool((accepted["LINE_ΔE"] > spec).any()):
-                    status = "實際產出超標"
-                elif margin < 0:
-                    status = "歷史變動情境有風險"
+            _spec = st.number_input(
+                "LINE ΔE* specification (CIE76)", min_value=0.01,
+                value=1.00, step=0.05, format="%.2f",
+                key="task3_current_color_de_spec",
+            )
+            # Signature prevents downloading stale results after changing K/method/color/file.
+            import hashlib as _hashlib
+            _source_tag = _hashlib.sha256(uploaded_data_file.getvalue()).hexdigest()[:16]
+            _signature = (
+                str(color), _mode, float(_spec), _source_tag,
+                tuple((str(r["Factor"]), float(r["Sigma K"]), float(r["IQR k"]),
+                       float(r["LAB LCL"]), float(r["LAB UCL"]))
+                      for r in _limits.to_dict("records")),
+                tuple(selected_years), tuple(selected_months),
+            )
+            _cache_key = "task3_selected_color_validation_export"
+            if (_cache_key in st.session_state
+                    and st.session_state[_cache_key].get("signature") != _signature):
+                del st.session_state[_cache_key]
+
+            if st.button("Calculate & Prepare Excel (selected color)",
+                         key="task3_current_color_calculate"):
+                _needed = [f"LAB_{f}" for f in factors] + [f"LINE_{f}" for f in factors]
+                _pairs = paired_all.dropna(subset=_needed).copy()
+                # Prevent silent use of missing LINE or LAB values.
+                for _f in factors:
+                    _pairs[f"Shift_{_f}"] = (
+                        pd.to_numeric(_pairs[f"LINE_{_f}"], errors="coerce")
+                        - pd.to_numeric(_pairs[f"LAB_{_f}"], errors="coerce")
+                    )
+                _pairs = _pairs.dropna(subset=[f"Shift_{f}" for f in factors]).copy()
+                if _pairs.empty:
+                    st.warning("沒有完整的 LAB–LINE 配對批次，無法計算。")
                 else:
-                    status = "歷史情境符合，待持續驗證"
-                results[code] = {"worst": worst, "margin": margin,
-                                 "failure": fail_rate, "status": status,
-                                 "accepted": len(accepted)}
-                batch.loc[sub.index, "LAB_合格"] = mask
-                batch.loc[sub.index, "LINE_超標"] = sub["LINE_ΔE"] > spec
+                    _pairs["LINE ΔE*"] = np.sqrt(
+                        sum(_pairs[f"LINE_{f}"].astype(float)**2 for f in factors)
+                    )
+                    _accepted = pd.Series(True, index=_pairs.index)
+                    _shift_stats = []
+                    _max_components = []
+                    for _f in factors:
+                        _r = _limits.loc[_limits["Factor"] == delta_label(_f)].iloc[0]
+                        _lo, _hi = float(_r["LAB LCL"]), float(_r["LAB UCL"])
+                        _accepted &= _pairs[f"LAB_{_f}"].between(_lo, _hi, inclusive="both")
+                        _dmin = float(_pairs[f"Shift_{_f}"].min())
+                        _dmax = float(_pairs[f"Shift_{_f}"].max())
+                        _ymin, _ymax = _lo + _dmin, _hi + _dmax
+                        _absmax = max(abs(_ymin), abs(_ymax))
+                        _max_components.append(_absmax)
+                        _shift_stats.append({
+                            "Factor": delta_label(_f), "Shift Min": _dmin,
+                            "Shift Max": _dmax, "LAB LCL": _lo, "LAB UCL": _hi,
+                            "LINE envelope min": _ymin, "LINE envelope max": _ymax,
+                            "Max abs LINE": _absmax,
+                        })
+                    _pairs["LAB within limits"] = _accepted
+                    _pairs["LINE result"] = np.where(
+                        _pairs["LINE ΔE*"] > _spec, "FAIL", "PASS"
+                    )
+                    _accepted_pairs = _pairs.loc[_accepted]
+                    _n = len(_accepted_pairs)
+                    _fails = int((_accepted_pairs["LINE ΔE*"] > _spec).sum())
+                    _rate = 100.0 * _fails / _n if _n else np.nan
+                    _worst = float(np.sqrt(sum(v*v for v in _max_components)))
+                    _margin = float(_spec - _worst)
+                    if _n == 0:
+                        _status = "無符合 LAB 界限之批次，無法驗證實際超標率"
+                    elif _fails > 0:
+                        _status = "實際產出有超標批次"
+                    elif _worst > _spec:
+                        _status = "歷史變動情境存在超標風險"
+                    else:
+                        _status = "歷史情境符合，仍需持續驗證"
 
-            cols = list(final_limits)
-            summary = pd.DataFrame({
-                "評估項目": ["LAB–LINE 最大推估 ΔE*", "LINE ΔE* 標準", "安全裕度",
-                             "實際 LINE 超標率", "LAB合格配對批數", "評估結果"]
-            })
-            for code in cols:
-                v = results[code]
-                summary[code] = [
-                    round(v["worst"], 3) if v["worst"] is not None else "—",
-                    "≤ 1.00",
-                    round(v["margin"], 3) if v["margin"] is not None else "—",
-                    f'{v["failure"]:.2f}%' if v["failure"] is not None else "—",
-                    v["accepted"], v["status"],
-                ]
-            limits_rows = [{"塗料編號": code, "因子": f, "LAB_LCL": bounds[i][0],
-                            "LAB_UCL": bounds[i][1]}
-                           for code, bounds in final_limits.items()
-                           for i, f in enumerate(factors)]
-            notes = pd.DataFrame({"說明": [
-                "LAB/LINE: 先取單筆北南平均，再依製造批號取平均。僅完整配對資料納入。",
-                "Shift = LINE - LAB；取所有完整歷史批次之Shift Min/Max。",
-                "Worst ΔE = sqrt(sum(max(abs(LCL+Shift_Min),abs(UCL+Shift_Max))^2))。",
-                "實際超標率 = 三項LAB均符合最終允收範圍，但LINE ΔE > 1.00之批數 / LAB合格配對批數。",
-                "歷史最不利情境不是未來失敗機率或絕對品質保證；樣本量不足須持續驗證。",
-                "ΔE採CIE76，需確認與工廠判定口徑一致。",
-            ]})
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                summary.to_excel(writer, sheet_name="Table5_Report", index=False)
-                pd.DataFrame(limits_rows).to_excel(writer, sheet_name="Final_LAB_Limits", index=False)
-                pd.DataFrame(shift_rows).to_excel(writer, sheet_name="Shift_Calculation", index=False)
-                batch.sort_values(["塗料編號", "Time"]).to_excel(writer, sheet_name="Paired_Batch_Detail", index=False)
-                notes.to_excel(writer, sheet_name="Method_Notes", index=False)
-            return summary, output.getvalue()
+                    _result = pd.DataFrame([
+                        {"評估項目": "色號", "結果": str(color)},
+                        {"評估項目": "採用入料界限", "結果": _mode},
+                        {"評估項目": "LAB–LINE 最大推估 ΔE*", "結果": round(_worst, 4)},
+                        {"評估項目": "LINE ΔE* 標準", "結果": float(_spec)},
+                        {"評估項目": "安全裕度 (標準 − 推估最大值)", "結果": round(_margin, 4)},
+                        {"評估項目": "LAB 合格之配對批數", "結果": _n},
+                        {"評估項目": "LAB 合格但 LINE 超標批數", "結果": _fails},
+                        {"評估項目": "實際 LINE 超標率 (%)", "結果": round(_rate, 2) if _n else "N/A"},
+                        {"評估項目": "評估結果", "結果": _status},
+                    ])
+                    _shift_df = pd.DataFrame(_shift_stats)
+                    _notes = pd.DataFrame([
+                        {"項目": "Data scope", "說明": "Selected color and active year/month filters only"},
+                        {"項目": "LAB limits", "說明": "Current Task 3 calculated LCL/UCL using selected k"},
+                        {"項目": "LINE component", "說明": "Batch means of per-row North/South component averages"},
+                        {"項目": "Shift", "說明": "LINE batch mean minus LAB batch mean"},
+                        {"項目": "Worst-case", "說明": "sqrt(sum(max(abs(LCL+ShiftMin),abs(UCL+ShiftMax))^2))"},
+                        {"項目": "Actual fail rate", "說明": "LINE ΔE* > spec among paired batches with all 3 LAB components in limits"},
+                        {"項目": "Caution", "說明": "Historical envelope is not a statistical probability or future guarantee"},
+                        {"項目": "ΔE* formula", "說明": "CIE76 based on three LINE batch mean components"},
+                    ])
+                    _buf = io.BytesIO()
+                    with pd.ExcelWriter(_buf, engine="openpyxl") as _writer:
+                        _result.to_excel(_writer, sheet_name="Verification_Summary", index=False)
+                        _limits.to_excel(_writer, sheet_name="Current_LAB_Limits", index=False)
+                        _shift_df.to_excel(_writer, sheet_name="Shift_Calculation", index=False)
+                        _pairs.to_excel(_writer, sheet_name="Paired_Batch_Detail", index=False)
+                        _notes.to_excel(_writer, sheet_name="Method_Notes", index=False)
+                        for _ws in _writer.book.worksheets:
+                            _ws.freeze_panes = "A2"
+                            _ws.auto_filter.ref = _ws.dimensions
+                            for _col in _ws.columns:
+                                _letter = _col[0].column_letter
+                                _max_len = max((len(str(_cell.value)) if _cell.value is not None else 0)
+                                               for _cell in _col[:min(len(_col), 100)])
+                                _ws.column_dimensions[_letter].width = min(max(_max_len + 2, 12), 42)
+                    st.session_state[_cache_key] = {
+                        "signature": _signature,
+                        "result": _result,
+                        "bytes": _buf.getvalue(),
+                    }
 
-        if st.button("Calculate 表5 & Prepare Excel", key="task3_simple_table5_button"):
-            try:
-                summary5, excel5 = _make_table5_report(df_raw)
-                st.dataframe(summary5, hide_index=True, use_container_width=True)
-                st.download_button("📥 Download 表5 Excel", excel5,
-                                   file_name="SPC_Table5_LAB_LINE_Verification.xlsx",
-                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                   key="task3_simple_table5_excel")
-            except Exception as exc:
-                st.error(f"無法產生表5，請檢查資料格式：{exc}")
+            _saved = st.session_state.get(_cache_key)
+            if _saved and _saved["signature"] == _signature:
+                st.dataframe(_saved["result"], hide_index=True, use_container_width=True)
+                _color_filename = re.sub(r"[^A-Za-z0-9_-]", "_", str(color))
+                st.download_button(
+                    "📥 Download Verification Excel (selected color)",
+                    data=_saved["bytes"],
+                    file_name=f"{_color_filename}_LAB_LINE_Verification.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="task3_current_color_excel_download",
+                )
+            st.caption(
+                "最大推估 ΔE* 為歷史 Shift 上下界組合之保守情境，"
+                "不是未來超標機率；樣本少時請勿宣稱可保證 LINE ΔE* ≤ 1.00。"
+            )
 
     # ---------------------------------------------------------
     # Task 3 Word Report Export
