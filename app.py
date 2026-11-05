@@ -1913,6 +1913,117 @@ elif app_mode == "🎛️ Control Limit Calculator":
                     else:
                         _status = "歷史情境符合，仍需持續驗證"
 
+                    # ---------------------------------------------------------
+                    # Component contribution + conservative candidate LAB limits.
+                    # Mathematically maximize the MINIMUM proportion of each
+                    # original 3 LAB interval widths retained (uniform fraction).
+                    # This is a historical-envelope scenario, NOT a statistically
+                    # validated optimum; no risk simulation, no plots, no reruns.
+                    # ---------------------------------------------------------
+                    _original_lo = np.array(_limits["LAB LCL"], dtype=float)
+                    _original_hi = np.array(_limits["LAB UCL"], dtype=float)
+                    _smin = np.array([r["Shift Min"] for r in _shift_stats], dtype=float)
+                    _smax = np.array([r["Shift Max"] for r in _shift_stats], dtype=float)
+                    _width = _original_hi - _original_lo
+                    _contribution = (np.square(_max_components) / (_worst ** 2) * 100.0
+                                     if _worst > 0 else np.zeros(3))
+                    _component_rows = []
+                    for _i, _r in enumerate(_shift_stats):
+                        _side = ("LCL + Shift Min" if abs(_r["LINE envelope min"]) >=
+                                 abs(_r["LINE envelope max"]) else "UCL + Shift Max")
+                        _component_rows.append({
+                            "Factor": _r["Factor"],
+                            "Current LAB LCL": _r["LAB LCL"],
+                            "Current LAB UCL": _r["LAB UCL"],
+                            "Shift Min": _r["Shift Min"],
+                            "Shift Max": _r["Shift Max"],
+                            "Worst LINE Component": (-_r["Max abs LINE"] if _side ==
+                                "LCL + Shift Min" and _r["LINE envelope min"] < 0 else
+                                _r["Max abs LINE"] if _side == "UCL + Shift Max" else
+                                _r["LINE envelope min"]),
+                            "Worst-case Boundary": _side,
+                            "Contribution (%)": float(_contribution[_i]),
+                        })
+                    _component_df = pd.DataFrame(_component_rows)
+
+                    def _candidate_for_retained_fraction(fraction):
+                        # At fixed interval width, choose a center minimizing
+                        # the envelope's largest absolute LINE component.
+                        half = 0.5 * fraction * _width
+                        ideal_center = -0.5 * (_smin + _smax)
+                        center = np.clip(ideal_center, _original_lo + half,
+                                         _original_hi - half)
+                        lo, hi = center - half, center + half
+                        ends_min, ends_max = lo + _smin, hi + _smax
+                        each = np.maximum(np.abs(ends_min), np.abs(ends_max))
+                        return lo, hi, float(np.linalg.norm(each))
+
+                    _prop_lo = _prop_hi = None
+                    _prop_worst = np.nan
+                    _retained_fraction = np.nan
+                    _proposal_note = ""
+                    if _worst <= _spec + 1e-9:
+                        _prop_lo, _prop_hi = _original_lo.copy(), _original_hi.copy()
+                        _prop_worst, _retained_fraction = _worst, 1.0
+                        _proposal_note = "現行界限已符合歷史情境，無須縮限"
+                    else:
+                        _min_lo, _min_hi, _min_worst = _candidate_for_retained_fraction(0.0)
+                        if _min_worst > _spec + 1e-9:
+                            _proposal_note = "即使縮至單點亦無法滿足歷史 Shift 情境，無可行建議界限"
+                        else:
+                            _left, _right = 0.0, 1.0
+                            for _iteration in range(45):
+                                _mid = 0.5 * (_left + _right)
+                                _, _, _trial_worst = _candidate_for_retained_fraction(_mid)
+                                if _trial_worst <= _spec - 1e-8:
+                                    _left = _mid
+                                else:
+                                    _right = _mid
+                            _prop_lo, _prop_hi, _prop_worst = _candidate_for_retained_fraction(_left)
+                            _retained_fraction = _left
+                            _proposal_note = "初步建議（最大共同保留寬度比例；非已驗證最適界限）"
+
+                    if _prop_lo is not None:
+                        _proposed_mask = pd.Series(True, index=_pairs.index)
+                        for _i, _f in enumerate(factors):
+                            _proposed_mask &= _pairs[f"LAB_{_f}"].between(
+                                float(_prop_lo[_i]), float(_prop_hi[_i]), inclusive="both")
+                        _prop_n = int(_proposed_mask.sum())
+                        _prop_fails = int((_pairs.loc[_proposed_mask, "LINE ΔE*"] > _spec).sum())
+                    else:
+                        _prop_n, _prop_fails = 0, 0
+                    _proposal_rows = []
+                    for _i, _f in enumerate(factors):
+                        _proposal_rows.append({
+                            "Factor": delta_label(_f),
+                            "Current LAB LCL": float(_original_lo[_i]),
+                            "Current LAB UCL": float(_original_hi[_i]),
+                            "Candidate LAB LCL": float(_prop_lo[_i]) if _prop_lo is not None else np.nan,
+                            "Candidate LAB UCL": float(_prop_hi[_i]) if _prop_hi is not None else np.nan,
+                            "Retained interval (%)": (100.0 * _retained_fraction
+                                                      if np.isfinite(_retained_fraction) else np.nan),
+                            "Contribution (%)": float(_contribution[_i]),
+                        })
+                    _proposal_df = pd.DataFrame(_proposal_rows)
+                    _comparison_df = pd.DataFrame([
+                        {"Item": "Historical envelope LINE ΔE*", "Current": _worst,
+                         "Candidate": _prop_worst},
+                        {"Item": "Margin to specification", "Current": _margin,
+                         "Candidate": _spec - _prop_worst if np.isfinite(_prop_worst) else np.nan},
+                        {"Item": "LAB accepted paired batches", "Current": _n,
+                         "Candidate": _prop_n if _prop_lo is not None else np.nan},
+                        {"Item": "Actual LINE failures among accepted", "Current": _fails,
+                         "Candidate": _prop_fails if _prop_lo is not None else np.nan},
+                        {"Item": "LAB acceptance rate (%)", "Current": 100.0 * _n / len(_pairs),
+                         "Candidate": 100.0 * _prop_n / len(_pairs) if _prop_lo is not None else np.nan},
+                    ])
+                    # A candidate with no accepted historical batches is still
+                    # mathematically feasible, but cannot be validated empirically.
+                    if _prop_lo is not None and _prop_n == 0:
+                        _proposal_note += "；建議範圍內無歷史合格批次，需另行驗證"
+                    elif _prop_lo is not None and _prop_n < 10:
+                        _proposal_note += f"；僅 {_prop_n} 筆歷史合格批次，證據不足"
+
                     _result = pd.DataFrame([
                         {"評估項目": "色號", "結果": str(color)},
                         {"評估項目": "採用入料界限", "結果": _mode},
@@ -1940,6 +2051,13 @@ elif app_mode == "🎛️ Control Limit Calculator":
                         _result.to_excel(_writer, sheet_name="Verification_Summary", index=False)
                         _limits.to_excel(_writer, sheet_name="Current_LAB_Limits", index=False)
                         _shift_df.to_excel(_writer, sheet_name="Shift_Calculation", index=False)
+                        _component_df.to_excel(_writer, sheet_name="Component_Contribution", index=False)
+                        _proposal_df.to_excel(_writer, sheet_name="Candidate_LAB_Limits", index=False)
+                        _comparison_df.to_excel(_writer, sheet_name="Current_vs_Candidate", index=False)
+                        pd.DataFrame([{"Candidate status / qualification": _proposal_note,
+                                       "Criterion": "Uniform percentage interval retention; minimize worst LINE component by centering",
+                                       "Limitation": "Historical extremes, not future failure probability or confirmed optimal operating limits"}]).to_excel(
+                            _writer, sheet_name="Candidate_Notes", index=False)
                         _pairs.to_excel(_writer, sheet_name="Paired_Batch_Detail", index=False)
                         _notes.to_excel(_writer, sheet_name="Method_Notes", index=False)
                         for _ws in _writer.book.worksheets:
@@ -1953,12 +2071,29 @@ elif app_mode == "🎛️ Control Limit Calculator":
                     st.session_state[_cache_key] = {
                         "signature": _signature,
                         "result": _result,
+                        "components": _component_df,
+                        "proposal": _proposal_df,
+                        "comparison": _comparison_df,
+                        "proposal_note": _proposal_note,
                         "bytes": _buf.getvalue(),
                     }
 
             _saved = st.session_state.get(_cache_key)
             if _saved and _saved["signature"] == _signature:
                 st.dataframe(_saved["result"], hide_index=True, use_container_width=True)
+                st.markdown("#### Worst-case ΔE* Component Contribution")
+                st.dataframe(_saved["components"].style.format({
+                    "Worst LINE Component": "{:.4f}",
+                    "Contribution (%)": "{:.1f}",
+                }), hide_index=True, use_container_width=True)
+                st.markdown("#### 初步 LAB 管制界限調整建議")
+                st.dataframe(_saved["proposal"].style.format({
+                    "Current LAB LCL": "{:.4f}", "Current LAB UCL": "{:.4f}",
+                    "Candidate LAB LCL": "{:.4f}", "Candidate LAB UCL": "{:.4f}",
+                    "Retained interval (%)": "{:.1f}", "Contribution (%)": "{:.1f}",
+                }, na_rep="N/A"), hide_index=True, use_container_width=True)
+                st.dataframe(_saved["comparison"], hide_index=True, use_container_width=True)
+                st.info(_saved["proposal_note"])
                 _color_filename = re.sub(r"[^A-Za-z0-9_-]", "_", str(color))
                 st.download_button(
                     "📥 Download Verification Excel (selected color)",
