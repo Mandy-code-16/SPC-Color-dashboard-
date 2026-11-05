@@ -2100,6 +2100,222 @@ elif app_mode == "🎛️ Control Limit Calculator":
             )
 
     # ---------------------------------------------------------
+    # REPORT TABLE 5: MULTI-COLOR APPROVED-LIMIT VERIFICATION
+    # Deliberately runs on demand; uses df_raw rather than sidebar-filtered df.
+    # This does not change any existing SPC formula or chart.
+    # ---------------------------------------------------------
+    st.markdown("---")
+    st.markdown("## 📋 表5 入料管制界限之 LINE 產出色差風險驗證")
+    st.caption(
+        "此表使用報告最後選定的 LAB 入料管制界限，不使用未經選定的 IQR/σ 初始範圍。"
+        "四種色號採全期間來源資料，與側邊欄的單一色號／年月篩選獨立；按下計算才開始處理。"
+    )
+
+    _report_limit_defaults = {
+        "PK2E1230L": ((0.10, 0.45), (0.00, 0.40), (-0.10, 0.25)),
+        "PS2E123PS": ((-0.10, 0.20), (-0.10, 0.20), (-0.20, 0.10)),
+        "PS2U188TP": ((-0.10, 0.40), (-0.20, 0.10), (0.00, 0.30)),
+        "PT20428A1": ((-0.20, 0.20), (-0.20, 0.10), (-0.20, 0.30)),
+    }
+    _report_limit_rows = []
+    for _code, _lim in _report_limit_defaults.items():
+        _report_limit_rows.append({
+            "Color Code": _code,
+            "ΔL LCL": _lim[0][0], "ΔL UCL": _lim[0][1],
+            "Δa LCL": _lim[1][0], "Δa UCL": _lim[1][1],
+            "Δb LCL": _lim[2][0], "Δb UCL": _lim[2][1],
+        })
+    st.caption("預設界限出自目前報告結論表；如已修改最終採用值，可直接編輯下表。")
+    _report_limit_edit = st.data_editor(
+        pd.DataFrame(_report_limit_rows), hide_index=True, use_container_width=True,
+        disabled=["Color Code"], key="task3_report_final_limits_editor",
+        column_config={"Color Code": st.column_config.TextColumn("Color Code", disabled=True)},
+    )
+
+    def _build_report_table5(all_data, edited_limits, threshold):
+        """Historical shift-envelope stress check; not a forecast of failure probability."""
+        table_rows, detail_frames, shift_rows, endpoint_rows = [], [], [], []
+        factor_names = ("ΔL", "Δa", "Δb")
+        available = all_data["塗料編號"].astype("string").str.strip()
+        for _, limit_row in edited_limits.iterrows():
+            code = str(limit_row["Color Code"]).strip()
+            limits = []
+            for f in factor_names:
+                lo, hi = float(limit_row[f"{f} LCL"]), float(limit_row[f"{f} UCL"])
+                if not (np.isfinite(lo) and np.isfinite(hi) and lo <= hi):
+                    raise ValueError(f"{code}: Invalid final limits for {f}; require finite LCL <= UCL")
+                limits.append((lo, hi))
+            color_df = all_data.loc[available == code, SPC_INPUT_COLUMNS]
+            if color_df.empty:
+                table_rows.append({
+                    "Color Code": code, "LAB–LINE 最大推估 ΔE*": np.nan,
+                    "LINE ΔE* 標準": threshold, "安全裕度": np.nan,
+                    "實際 LINE 超標率 (%)": np.nan, "LAB 合格批數": 0,
+                    "LAB 合格且 LINE 超標批數": 0, "有效配對批數": 0,
+                    "評估結果": "無此色號資料",
+                })
+                continue
+            batch_data = calculate_batch_averages(color_df)
+            combined = None
+            for f in factor_names:
+                lab = batch_data[f]["lab"][["製造批號", "Time", "value"]].rename(
+                    columns={"Time": f"Time_{f}", "value": f"LAB_{f}"}
+                )
+                line = batch_data[f]["line"][["製造批號", "value"]].rename(
+                    columns={"value": f"LINE_{f}"}
+                )
+                part = lab.merge(line, on="製造批號", how="inner")
+                combined = part if combined is None else combined.merge(part, on="製造批號", how="inner")
+            necessary = [f"{source}_{f}" for source in ("LAB", "LINE") for f in factor_names]
+            combined = combined.dropna(subset=necessary).copy()
+            if combined.empty:
+                table_rows.append({
+                    "Color Code": code, "LAB–LINE 最大推估 ΔE*": np.nan,
+                    "LINE ΔE* 標準": threshold, "安全裕度": np.nan,
+                    "實際 LINE 超標率 (%)": np.nan, "LAB 合格批數": 0,
+                    "LAB 合格且 LINE 超標批數": 0, "有效配對批數": 0,
+                    "評估結果": "無完整 LAB–LINE 配對批次",
+                })
+                continue
+            accept = np.ones(len(combined), dtype=bool)
+            endpoint_abs = []
+            for f, (lo, hi) in zip(factor_names, limits):
+                lab_col = f"LAB_{f}"
+                line_col = f"LINE_{f}"
+                shift_col = f"Shift_{f}"
+                combined[shift_col] = combined[line_col] - combined[lab_col]
+                accept &= combined[lab_col].between(lo, hi, inclusive="both").to_numpy()
+                smin = float(combined[shift_col].min())
+                smax = float(combined[shift_col].max())
+                predicted_min = lo + smin
+                predicted_max = hi + smax
+                maximum_abs = max(abs(predicted_min), abs(predicted_max))
+                endpoint_abs.append(maximum_abs)
+                shift_rows.append({
+                    "Color Code": code, "Factor": f,
+                    "Shift Min": smin, "Shift Max": smax,
+                    "Shift Mean": float(combined[shift_col].mean()),
+                    "Shift SD": float(combined[shift_col].std(ddof=1)) if len(combined) > 1 else np.nan,
+                    "Valid paired batches": len(combined),
+                })
+                endpoint_rows.append({
+                    "Color Code": code, "Factor": f,
+                    "LAB LCL": lo, "LAB UCL": hi,
+                    "Shift Min": smin, "Shift Max": smax,
+                    "LINE Min (LCL+Shift Min)": predicted_min,
+                    "LINE Max (UCL+Shift Max)": predicted_max,
+                    "Worst absolute LINE component": maximum_abs,
+                })
+            combined["LAB Accepted"] = accept
+            combined["LINE ΔE* (batch CIE76)"] = np.sqrt(
+                sum(combined[f"LINE_{f}"].astype(float) ** 2 for f in factor_names)
+            )
+            combined["LINE Fail"] = combined["LINE ΔE* (batch CIE76)"] > threshold
+            accepted_n = int(accept.sum())
+            failed_n = int((combined["LAB Accepted"] & combined["LINE Fail"]).sum())
+            worst = float(np.linalg.norm(endpoint_abs))
+            margin = float(threshold - worst)
+            actual_failure = (100 * failed_n / accepted_n) if accepted_n else np.nan
+            if accepted_n == 0:
+                status = "無 LAB 合格配對批次，待驗證"
+            elif failed_n:
+                status = "實際產出超標"
+            elif worst > threshold:
+                status = "歷史偏移情境存在超標風險"
+            else:
+                status = "歷史情境符合，待持續驗證"
+            table_rows.append({
+                "Color Code": code,
+                "LAB–LINE 最大推估 ΔE*": worst,
+                "LINE ΔE* 標準": threshold,
+                "安全裕度": margin,
+                "實際 LINE 超標率 (%)": actual_failure,
+                "LAB 合格批數": accepted_n,
+                "LAB 合格且 LINE 超標批數": failed_n,
+                "有效配對批數": len(combined),
+                "評估結果": status,
+            })
+            combined.insert(0, "Color Code", code)
+            detail_frames.append(combined)
+        summary = pd.DataFrame(table_rows)
+        details = pd.concat(detail_frames, ignore_index=True) if detail_frames else pd.DataFrame()
+        return summary, details, pd.DataFrame(shift_rows), pd.DataFrame(endpoint_rows)
+
+    _recalculate_table5 = st.button(
+        "🧮 Calculate & Prepare Excel — All 4 Colors",
+        key="task3_calculate_report_table5",
+        type="primary",
+    )
+    if _recalculate_table5:
+        try:
+            _summary5, _batch5, _shift5, _endpoints5 = _build_report_table5(
+                df_raw, _report_limit_edit, float(output_de_threshold)
+            )
+            _note5 = pd.DataFrame([
+                {"Item": "Source", "Description": "Uploaded Production / SPC Data; all dates, 4 report colors (not sidebar-filtered)"},
+                {"Item": "Limits", "Description": "Editable report final LAB limits; may differ from provisional IQR or sigma values"},
+                {"Item": "Aggregation", "Description": "LAB batch mean; LINE N/S row average then batch mean; only complete LAB-LINE paired batches"},
+                {"Item": "LINE Delta E", "Description": "CIE76 = sqrt(batch LINE Delta L^2 + Delta a^2 + Delta b^2); confirm same reference and factory specification"},
+                {"Item": "Historical worst", "Description": "Combine LAB bound and component-wise observed Shift Min/Max; conservative envelope, not a probability or future guarantee"},
+                {"Item": "Safety margin", "Description": "LINE DE specification minus historical worst-case DE"},
+                {"Item": "Actual exceedance", "Description": "Of paired batches with all three LAB factors inside final limits, share with LINE batch CIE76 > specification"},
+                {"Item": "Important", "Description": "Batch averages may conceal individual failing coils. Validate separately at coil-level where appropriate."},
+                {"Item": "Confidence", "Description": "A small number of observed batches does not prove future zero failure probability. Independent post-limit validation is recommended."},
+            ])
+            _output5 = io.BytesIO()
+            with pd.ExcelWriter(_output5, engine="openpyxl") as _writer5:
+                _summary5.to_excel(_writer5, sheet_name="Table5_Report", index=False)
+                _report_limit_edit.to_excel(_writer5, sheet_name="Final_LAB_Limits", index=False)
+                _shift5.to_excel(_writer5, sheet_name="Shift_Statistics", index=False)
+                _endpoints5.to_excel(_writer5, sheet_name="Worst_Case_Calculation", index=False)
+                _batch5.to_excel(_writer5, sheet_name="Paired_Batch_Detail", index=False)
+                _note5.to_excel(_writer5, sheet_name="Method_Notes", index=False)
+                for _ws in _writer5.book.worksheets:
+                    _ws.freeze_panes = "A2"
+                    _ws.auto_filter.ref = _ws.dimensions
+                    from openpyxl.utils import get_column_letter as _column_letter5
+                    for _col5 in _ws.columns:
+                        _header5 = str(_col5[0].value or "")
+                        _ws.column_dimensions[_column_letter5(_col5[0].column)].width = min(max(len(_header5) + 2, 15), 38)
+            st.session_state["task3_report_table5_output"] = {
+                "summary": _summary5,
+                "excel": _output5.getvalue(),
+                "source_signature": (
+                    uploaded_data_file.name, __import__("hashlib").sha256(uploaded_data_file.getvalue()).hexdigest(),
+                    float(output_de_threshold), _report_limit_edit.to_json(orient="records")
+                ),
+            }
+        except (ValueError, TypeError, KeyError) as _e5:
+            st.error(f"Cannot build Table 5: {_e5}")
+    _ready5 = st.session_state.get("task3_report_table5_output")
+    _current_sig5 = (uploaded_data_file.name, __import__("hashlib").sha256(uploaded_data_file.getvalue()).hexdigest(),
+                     float(output_de_threshold), _report_limit_edit.to_json(orient="records"))
+    if _ready5 and _ready5["source_signature"] == _current_sig5:
+        _display5 = _ready5["summary"]
+        st.dataframe(_display5.style.format({
+            "LAB–LINE 最大推估 ΔE*": "{:.3f}",
+            "LINE ΔE* 標準": "≤{:.2f}",
+            "安全裕度": "{:+.3f}",
+            "實際 LINE 超標率 (%)": "{:.2f}%",
+        }, na_rep="—"), hide_index=True, use_container_width=True)
+        _selected5 = _display5[_display5["Color Code"] == str(color)]
+        if not _selected5.empty:
+            st.caption(f"目前選定色號：{color}；上方則為四種色號報告摘要。")
+        st.download_button(
+            "📥 Download 表5 + Calculation Details (Excel)",
+            data=_ready5["excel"],
+            file_name="SPC_Table5_All_Colors_Risk_Verification.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="task3_report_table5_download",
+        )
+        st.caption(
+            "注意：最大推估 ΔE* 為依歷史 Shift 範圍建立之保守情境值；"
+            "不能解讀為真實未來失敗機率或絕對保證。有效配對數過少時，僅供初步驗證。"
+        )
+    elif _ready5:
+        st.info("Source file, acceptance limits or ΔE* specification changed. Click Calculate again to refresh Excel.")
+
+    # ---------------------------------------------------------
     # Task 3 Word Report Export
     # ---------------------------------------------------------
     if calc_res:
