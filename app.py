@@ -11,6 +11,82 @@ from docx.enum.section import WD_ORIENT, WD_SECTION
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from datetime import datetime
 
+# =============================================================
+# Task 3 only: reproducible DATA-DRIVEN numerical LAB candidate.
+# This does not alter IQR or any SPC chart.
+# Maximize box volume inside IQR ∩ LAB ΔE* <= limit, with the
+# historical eligible LAB mean included. No arbitrary shrink %.
+# =============================================================
+def propose_lab_box(iqr_lcl, iqr_ucl, historical_lab, lab_spec=0.50):
+    """Return a large-volume candidate LAB box, or (None, reason).
+
+    The optimized box must lie within the three IQR bounds and the
+    LAB CIE76 sphere, and contain the mean of eligible historical LAB.
+    It is an exploratory design choice, NOT a statistical confidence
+    interval nor a guarantee of LINE conformity.
+    """
+    from scipy.optimize import minimize
+    low = np.asarray(iqr_lcl, dtype=float)
+    high = np.asarray(iqr_ucl, dtype=float)
+    hist = np.asarray(historical_lab, dtype=float).reshape(-1, 3)
+    hist = hist[np.isfinite(hist).all(axis=1)]
+    if len(hist) == 0:
+        return None, '沒有 IQR 範圍內且 LAB ΔE* ≤ 0.50 的歷史批次，無法確定數據中心。'
+    center = hist.mean(axis=0)  # convex mean of valid points
+    if np.linalg.norm(center) >= lab_spec - 1e-8:
+        return None, '歷史 LAB 中心太接近規格邊界，無法建立正寬度三因子界限。'
+    if np.any(center < low - 1e-9) or np.any(center > high + 1e-9):
+        return None, '歷史 LAB 中心不在目前 IQR 界限內。'
+
+    # Start with a tiny feasible box around the historical center.
+    margin = (lab_spec - np.linalg.norm(center)) / (3.0 ** 0.5)
+    distance = np.minimum(center - low, high - center)
+    # If center exactly touches a bound, expand only toward the other side.
+    eps = min(float(margin) * 0.15, float(np.min(high - low)) * 0.04)
+    if eps < 1e-7:
+        return None, 'IQR 區間過窄，無法進行建議範圍估算。'
+    init_low = np.maximum(low, center - eps)
+    init_high = np.minimum(high, center + eps)
+    if np.any(init_high <= init_low):
+        return None, '初始候選區間沒有有效寬度。'
+    x0 = np.concatenate([init_low, init_high])
+    def volume_objective(x):
+        widths = x[3:] - x[:3]
+        if np.any(widths <= 0):
+            return 1e9 + float(np.abs(widths[widths <= 0]).sum()) * 1e9
+        return -float(np.log(widths).sum())
+    def lab_sphere_constraint(x):
+        extremes = np.maximum(np.abs(x[:3]), np.abs(x[3:]))
+        return float(lab_spec ** 2 - extremes @ extremes)
+    cons = [
+        {'type': 'ineq', 'fun': lab_sphere_constraint},
+        {'type': 'ineq', 'fun': lambda x: x[3:] - x[:3] - 1e-7},
+    ]
+    bounds = [(float(low[i]), float(center[i])) for i in range(3)] + [
+        (float(center[i]), float(high[i])) for i in range(3)
+    ]
+    res = minimize(volume_objective, x0, method='SLSQP', bounds=bounds,
+                   constraints=cons, options={'maxiter': 600, 'ftol': 1e-11})
+    if (not res.success or not np.isfinite(res.x).all()
+        or lab_sphere_constraint(res.x) < -1e-8
+        or np.any(res.x[3:] - res.x[:3] <= 0)):
+        return None, '最大區間體積求解未收斂；不輸出未驗證的建議 LCL/UCL。'
+    raw_lo, raw_hi = res.x[:3], res.x[3:]
+    # Conservative rounding for an operations table with two decimals:
+    # round LCL UP and UCL DOWN so displayed limits never widen the safe box.
+    cand_lo = np.ceil(raw_lo * 100 - 1e-9) / 100
+    cand_hi = np.floor(raw_hi * 100 + 1e-9) / 100
+    if np.any(cand_hi <= cand_lo):
+        return None, '界限保守取至小數兩位後區間過窄，無法建立有效三項建議界限。'
+    worst_lab = float(np.linalg.norm(np.maximum(np.abs(cand_lo), np.abs(cand_hi))))
+    if worst_lab > lab_spec + 1e-10:
+        return None, '候選界限小數兩位取值後未通過 LAB ΔE* 驗證。'
+    return {
+        'low': cand_lo, 'high': cand_hi, 'center': center,
+        'worst_lab_de': worst_lab,
+        'n_used': len(hist), 'volume': float(np.prod(cand_hi - cand_lo)),
+    }, None
+
 # =========================
 # PAGE CONFIG
 # =========================
@@ -1905,7 +1981,40 @@ elif app_mode == "🎛️ Control Limit Calculator":
             _n_iqr = int(_inside_box.sum())
             _n_iqr_lab_ng = int(np.sum(_inside_box & (_lab_de > _lab_spec_post)))
             _n_bad = int(np.sum(_eligible_lab & (_line_de > _line_spec_post)))
-            st.markdown("### 步驟 3｜用歷史 LAB–LINE 變動驗證產出 ΔE* ≤ 1.00")
+            # Numerical candidate: max-volume rectangular LAB region inside
+            # IQR ∩ LAB ΔE* <= 0.50, anchored to the eligible LAB historical mean.
+            _candidate, _candidate_error = propose_lab_box(
+                _lo_post, _hi_post, _lab_mat[_eligible_lab], _lab_spec_post
+            )
+            st.markdown("### 步驟 3｜歷史數據導向之 LAB 數值範圍建議")
+            st.caption(
+                "使用 IQR 內且 LAB ΔE* ≤ 0.50 的歷史批次平均值作為參考中心；"
+                "在原 IQR 內求取符合『全區間 LAB ΔE* ≤ 0.50』且體積最大的三因子長方體。"
+                "不使用主觀的 10%、20%、40% 縮減比例。此為數學設計候選界限，非已驗證的 LINE 最佳化管制界限。"
+            )
+            if _candidate is None:
+                st.warning("暫無可提供之三因子數值候選界限：" + _candidate_error)
+            else:
+                _candidate_l = _candidate['low']
+                _candidate_u = _candidate['high']
+                _proposal_table = pd.DataFrame({
+                    '色差因子': ['ΔL*', 'Δa*', 'Δb*'],
+                    'IQR LCL': [fmt_num_trim(x) for x in _lo_post],
+                    'IQR UCL': [fmt_num_trim(x) for x in _hi_post],
+                    '初步建議 LCL': [fmt_num_trim(x) for x in _candidate_l],
+                    '初步建議 UCL': [fmt_num_trim(x) for x in _candidate_u],
+                    '計算依據': ['歷史合格 LAB 平均中心 + 最大區間體積，受 IQR 與 LAB ΔE* ≤ 0.50 限制'] * 3,
+                })
+                st.dataframe(_proposal_table, hide_index=True, use_container_width=True)
+                _p1, _p2 = st.columns(2)
+                _p1.metric('候選全區間最大 LAB ΔE*', fmt_num_trim(_candidate['worst_lab_de']))
+                _candidate_hist_mask = np.all((_lab_mat >= _candidate_l) & (_lab_mat <= _candidate_u), axis=1)
+                _candidate_hist_n = int(_candidate_hist_mask.sum())
+                _p2.metric('候選界限涵蓋歷史批數', f'{_candidate_hist_n}/{_n_pair}')
+                st.caption('限制條件：建議 LCL/UCL 不超出 IQR；歷史合格 LAB 平均中心位於建議範圍內；最不利 LAB ΔE* ≤ 0.50。實際 LINE 風險須於下一步確認。')
+                if _n_lab < 10:
+                    st.warning(f'可用 LAB 合格歷史批次只有 {_n_lab} 批，建議數值對小樣本非常敏感，僅供試算。')
+            st.markdown("### 步驟 4｜用歷史 LAB–LINE 變動驗證產出 ΔE* ≤ 1.00")
             _c1, _c2, _c3, _c4 = st.columns(4)
             _c1.metric("有效配對批數", fmt_num_trim(_n_pair))
             _c2.metric("落在 IQR 內", fmt_num_trim(_n_iqr))
@@ -1967,6 +2076,18 @@ elif app_mode == "🎛️ Control Limit Calculator":
                         _de_sim = np.linalg.norm(_line_sim, axis=1)
                         _sim_fail = int(np.sum(_de_sim > _line_spec_post))
                         _q95 = float(np.quantile(_de_sim, 0.95))
+                        _cand_de_sim = None
+                        _cand_bad = None
+                        _cand_p95 = None
+                        if _candidate is not None:
+                            # Same Shift draws, and same randomized base coordinates
+                            # to permit direct scenario comparison, without any
+                            # fictitious improvement in real-world probability.
+                            _cand_lab_sim = _candidate_l + _rng_post.random((_sim_n, 3)) * (_candidate_u - _candidate_l)
+                            _cand_line_sim = _cand_lab_sim + _shift_mat[_selected_idx]
+                            _cand_de_sim = np.linalg.norm(_cand_line_sim, axis=1)
+                            _cand_bad = int(np.sum(_cand_de_sim > _line_spec_post))
+                            _cand_p95 = float(np.quantile(_cand_de_sim, 0.95))
                         _sim_export = pd.DataFrame({
                             "模擬編號": np.arange(1, _sim_n + 1),
                             "Shift 來源批次": _hist_post["製造批號"].to_numpy()[_selected_idx],
@@ -1975,6 +2096,9 @@ elif app_mode == "🎛️ Control Limit Calculator":
                             "LINE ΔL*": _line_sim[:, 0], "LINE Δa*": _line_sim[:, 1], "LINE Δb*": _line_sim[:, 2],
                             "LINE ΔE*": _de_sim, "LINE 超標": _de_sim > _line_spec_post,
                         })
+                        if _cand_de_sim is not None:
+                            _sim_export['候選 LINE ΔE*'] = _cand_de_sim
+                            _sim_export['候選 LINE 超標'] = _cand_de_sim > _line_spec_post
                         _export_summary = pd.DataFrame([
                             ("分析色號", str(color), "側邊欄所選色號"),
                             ("IQR 最不利 LAB ΔE*", _lab_box_de, "SQRT(SUM(MAX(ABS(LCL), ABS(UCL))²))"),
@@ -1987,6 +2111,9 @@ elif app_mode == "🎛️ Control Limit Calculator":
                             ("LINE 模擬超標次數", _sim_fail, "LINE ΔE* > 1.00"),
                             ("LINE 模擬超標率 (%)", 100 * _sim_fail / _sim_n, "超標次數 / 模擬次數 × 100"),
                             ("LINE 模擬 ΔE* P95", _q95, "模擬第 95 百分位"),
+                            ("候選 LINE 模擬超標率 (%)", (100 * _cand_bad / _sim_n if _cand_bad is not None else np.nan), "候選範圍 + 相同歷史 Shift 抽樣"),
+                            ("候選 LINE 模擬 ΔE* P95", (_cand_p95 if _cand_p95 is not None else np.nan), "候選區間抽樣的第 95 百分位"),
+                            ("候選界限求解方法", "歷史合格 LAB 平均中心下，最大化安全長方體體積", "IQR 區間內；全候選區域 LAB ΔE* ≤ 0.50；不使用縮減比例"),
                             ("結論限制", "情境分析，非實際未來機率", "少量歷史批次須獨立驗證"),
                         ], columns=["項目", "結果", "公式與說明"])
                         _export_iqr = pd.DataFrame({
@@ -1999,6 +2126,13 @@ elif app_mode == "🎛️ Control Limit Calculator":
                         with pd.ExcelWriter(_xlsx, engine="openpyxl") as _writer:
                             _export_summary.to_excel(_writer, sheet_name="Validation_Summary", index=False)
                             _export_iqr.to_excel(_writer, sheet_name="IQR_Limits", index=False)
+                            if _candidate is not None:
+                                pd.DataFrame({
+                                    '色差因子': ['ΔL*', 'Δa*', 'Δb*'],
+                                    'IQR LCL': _lo_post, 'IQR UCL': _hi_post,
+                                    '歷史 LAB 中心': _candidate['center'],
+                                    '建議 LCL': _candidate_l, '建議 UCL': _candidate_u,
+                                }).to_excel(_writer, sheet_name='Proposed_LAB_Limits', index=False)
                             _hist_post.to_excel(_writer, sheet_name="Historical_Paired", index=False)
                             _sim_export.to_excel(_writer, sheet_name="LAB_LINE_Simulation", index=False)
                             for _ws in _writer.book.worksheets:
@@ -2015,8 +2149,10 @@ elif app_mode == "🎛️ Control Limit Calculator":
                                             _cell.number_format = "0.##"
                         st.session_state["task3_iqr_historical_validation_v7"] = {
                             "signature": _sig_post,
-                            "results": {"n": _sim_n, "bad": _sim_fail, "p95": _q95},
+                            "results": {"n": _sim_n, "bad": _sim_fail, "p95": _q95,
+                                        "candidate_bad": _cand_bad, "candidate_p95": _cand_p95},
                             "values": _de_sim,
+                            "candidate_values": _cand_de_sim,
                             "excel": _xlsx.getvalue(),
                             "filename": f"{re.sub(r'[^A-Za-z0-9_-]', '_', str(color))}_IQR_LAB_LINE_Historical_Validation.xlsx",
                         }
@@ -2031,6 +2167,23 @@ elif app_mode == "🎛️ Control Limit Calculator":
                         _m1.metric("模擬 LINE 超標率", fmt_percent_trim(100 * _sim_result["bad"] / _sim_result["n"]))
                         _m2.metric("模擬 LINE ΔE* P95", fmt_num_trim(_sim_result["p95"]))
                         _m3.metric("LINE ΔE* 規格", "≤ 1.00")
+                        if _sim_result.get('candidate_bad') is not None:
+                            st.markdown('#### 原 IQR 合格 LAB 區域與候選數值區間：LINE 風險比較')
+                            _risk_comparison = pd.DataFrame([
+                                {'評估項目': 'LINE 模擬超標率',
+                                 '現行 IQR + LAB ΔE*': fmt_percent_trim(100 * _sim_result['bad'] / _sim_result['n']),
+                                 '初步建議數值區間': fmt_percent_trim(100 * _sim_result['candidate_bad'] / _sim_result['n'])},
+                                {'評估項目': 'LINE 模擬 ΔE* P95',
+                                 '現行 IQR + LAB ΔE*': fmt_num_trim(_sim_result['p95']),
+                                 '初步建議數值區間': fmt_num_trim(_sim_result['candidate_p95'])},
+                            ])
+                            st.dataframe(_risk_comparison, hide_index=True, use_container_width=True)
+                            if _sim_result['candidate_bad'] > _sim_result['bad']:
+                                st.warning('候選數值界限未降低本次 LINE 模擬超標率；不可將其稱為製程改善最佳方案。')
+                            elif _sim_result['candidate_bad'] == _sim_result['bad']:
+                                st.info('候選數值界限之 LINE 模擬超標率未呈現下降；目前沒有實證改善證據。')
+                            else:
+                                st.info('候選數值界限之情境超標率較低，仍需額外生產批次驗證，不能直接視為安全保證。')
                         _sim_values = np.asarray(_sim_saved["values"], dtype=float)
                         st.markdown("#### LINE ΔE* 模擬分布（Histogram）")
                         _fig, _ax = plt.subplots(figsize=(9.5, 3.8))
@@ -2080,11 +2233,11 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 else:
                     st.info("按「模擬合格 LAB 對 LINE 產出的風險」以檢查歷史 Shift 情境，IQR 計算不受影響。")
 
-        st.markdown("### 步驟 4｜綜合結論與建議")
+        st.markdown("### 步驟 5｜綜合結論與報告摘要")
         if _box_pass:
             st.success("LAB 檢查：IQR 三項界限內的任意組合皆可符合 LAB ΔE* ≤ 0.50，無須另行縮減 IQR。")
         else:
-            st.warning("LAB 檢查：原 IQR 範圍包含 LAB ΔE* > 0.50 的組合。建議維持原 IQR 並加上 LAB ΔE* ≤ 0.50 的入料判定，不使用任意的 10%、20% 或 40% 縮減。")
+            st.warning("LAB 檢查：原 IQR 範圍包含 LAB ΔE* > 0.50 的組合。仍建議以 IQR + LAB ΔE* ≤ 0.50 作為正式聯合判定；三因子候選數值界限僅供試算。")
         if paired_all.empty or any(c not in paired_all.columns for c in _required_post):
             st.info("LINE 檢查：缺乏完整同批三因子配對，無法推估產出風險；目前不能宣稱已建立可保證 LINE 合格的最佳化界限。")
         elif _n_pair < 3:
@@ -2101,6 +2254,34 @@ elif app_mode == "🎛️ Control Limit Calculator":
             else:
                 st.info("LINE 檢查：須完成歷史 Shift 模擬後，才能提供 LINE ΔE* > 1.00 的情境風險結果。")
         st.caption("結論：IQR 是統計界限；LAB ΔE* ≤ 0.50 是入料品質規格；LINE ΔE* ≤ 1.00 是產出品質規格。三者不可互相取代。")
+        st.markdown('#### 可直接引用於報告之評估摘要')
+        if paired_all.empty or any(c not in paired_all.columns for c in _required_post):
+            _report_line = '缺少完整 LAB–LINE 配對資料，尚無法驗證 LINE 產出風險。'
+        elif _n_pair < 3:
+            _report_line = '歷史配對批次不足 3 批，LINE 風險尚無法模擬驗證。'
+        else:
+            _end = st.session_state.get('task3_iqr_historical_validation_v7')
+            if _end and _end.get('signature') == _sig_post and 'results' in _end:
+                _r = _end['results']
+                _report_line = '現行聯合接受區域之 LINE 模擬超標率為 ' + fmt_percent_trim(100 * _r['bad'] / _r['n']) + '。'
+                if _r.get('candidate_bad') is not None:
+                    _report_line += '候選數值範圍為 ' + fmt_percent_trim(100 * _r['candidate_bad'] / _r['n']) + '。'
+            else:
+                _report_line = '請完成 LINE 歷史 Shift 模擬以評估候選數值範圍的產出風險。'
+        _report_limits = (
+            ('依歷史合格 LAB 平均中心求得受 IQR 與 LAB ΔE* ≤ 0.50 限制之最大體積數值候選範圍：'
+             + '、'.join(f'{f}: {lo:.4f}～{hi:.4f}' for f, lo, hi in zip(('ΔL*', 'Δa*', 'Δb*'), _candidate['low'], _candidate['high']))
+             + f'；候選全區間最大 LAB ΔE* = {_candidate["worst_lab_de"]:.4f}。')
+            if '_candidate' in locals() and _candidate is not None
+            else '目前沒有足夠條件建立三項數值候選界限。'
+        )
+        _report_text = (
+            f'本次分析採用現行 IQR 統計界限，原 IQR 全區間最大推估 LAB ΔE* = {_lab_box_de:.4f}，'
+            + ('符合' if _box_pass else '超過') + '入料規格 0.50。'
+            + _report_limits + _report_line
+            + '上述數值區間為歷史資料下的初步數學候選方案，非已核准的 SPC 界限或經驗證的 LINE 安全保證。'
+        )
+        st.text_area('報告文字（可複製）', _report_text, height=115, key='task3_risk_report_summary_v9')
 
     # ---------------------------------------------------------
     # Task 3 Word Report Export
