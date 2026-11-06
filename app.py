@@ -2190,6 +2190,8 @@ elif app_mode == "🎛️ Control Limit Calculator":
     _summary = pd.DataFrame()
     _shift_stats = pd.DataFrame()
     _shift_range_table = pd.DataFrame()
+    _backcalc_detail = pd.DataFrame()
+    _backcalc_formula = pd.DataFrame()
     _opt = {}
     _case_audit = None
     _stress_initial = pd.DataFrame()
@@ -2294,6 +2296,43 @@ elif app_mode == "🎛️ Control Limit Calculator":
                     '建議 LAB LCL':_b_lo,'建議 LAB UCL':_b_hi,
                 })
                 st.dataframe(_limits.style.format(precision=2),use_container_width=True,hide_index=True)
+
+                # Reproducible calculation chain: Shift extrema -> raw/clipped center
+                # -> observed valid LAB endpoints -> solved t -> recommended LCL/UCL.
+                # All calculations below retain full precision; formatting alone is 0.00.
+                _backcalc_detail = pd.DataFrame({
+                    '因子':_names,
+                    'Shift Min':_opt['shift_min'],
+                    'Shift Max':_opt['shift_max'],
+                    'Shift 中點':_opt['shift_mid'],
+                    '理論補償中心':-_opt['shift_mid'],
+                    'LAB 實測 Min':_opt['observed_lo'],
+                    'LAB 實測 Max':_opt['observed_hi'],
+                    '採用中心 C':_opt['center'],
+                    '擴展係數 t':np.repeat(float(_opt['scale']),3),
+                    '建議 LCL':_b_lo,
+                    '建議 UCL':_b_hi,
+                })
+                _backcalc_formula = pd.DataFrame([
+                    {
+                        '因子':_names[i],
+                        '補償中心公式':f'C = CLIP(−({sm:.2f} + {sx:.2f})/2, {aa:.2f}, {bb:.2f}) = {cc:.2f}',
+                        'LCL 代入公式':f'{cc:.2f} + {float(_opt["scale"]):.2f} × ({aa:.2f} − {cc:.2f}) ≈ {_b_lo[i]:.2f}',
+                        'UCL 代入公式':f'{cc:.2f} + {float(_opt["scale"]):.2f} × ({bb:.2f} − {cc:.2f}) ≈ {_b_hi[i]:.2f}',
+                    }
+                    for i,(sm,sx,aa,bb,cc) in enumerate(zip(
+                        _opt['shift_min'],_opt['shift_max'],
+                        _opt['observed_lo'],_opt['observed_hi'],_opt['center']))
+                ])
+                st.markdown('**計算過程｜由 Shift 推導建議 LCL/UCL**')
+                st.dataframe(_backcalc_detail.style.format(precision=2),
+                             use_container_width=True,hide_index=True)
+                st.markdown('**逐項公式代入（ΔL*、Δa*、Δb*）**')
+                st.dataframe(_backcalc_formula,use_container_width=True,hide_index=True)
+                st.latex(r'C_j=\operatorname{clip}\left(-\frac{S_{j,min}+S_{j,max}}{2},\ LAB_{j,min},\ LAB_{j,max}\right)')
+                st.latex(r'LCL_j=C_j+t(LAB_{j,min}-C_j)\qquad UCL_j=C_j+t(LAB_{j,max}-C_j)')
+                st.caption('t 由 0～1 二分搜尋最大可行值，須同時滿足 LAB ΔE* 上限與 LINE 在歷史 Shift Min/Max 組合下的保守上界；'
+                           '計算使用未四捨五入數據，公式代入僅顯示兩位小數，故手算結果可能有尾數差異。')
                 _stress_proposed,_worst_proposed_case=task3_stress_audit(
                     _b_lo,_b_hi,_valid_paired,line_de_target)
                 if _worst_proposed_case is not None:
@@ -2352,6 +2391,18 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 _shift_range_table.to_excel(_writer, sheet_name='5_1_Shift_Range', index=False)
                 _risk_overview.to_excel(_writer, sheet_name='IQR_Risk', index=False)
                 _limits.to_excel(_writer, sheet_name='5_2_LAB_Limits', index=False)
+                _backcalc_detail.to_excel(_writer, sheet_name='5_2_Calculation', index=False)
+                _backcalc_formula.to_excel(_writer, sheet_name='5_2_Substitution', index=False)
+                # Live Excel formulas for checking the recommended limits.
+                _calc_ws = _writer.sheets['5_2_Calculation']
+                _calc_ws['L1'] = 'LCL Excel 驗算'
+                _calc_ws['M1'] = 'UCL Excel 驗算'
+                for _r in range(2, 2 + len(_backcalc_detail)):
+                    # F = observed LAB min, G = max, H = chosen center, I = scale t.
+                    _calc_ws[f'L{_r}'] = f'=H{_r}+I{_r}*(F{_r}-H{_r})'
+                    _calc_ws[f'M{_r}'] = f'=H{_r}+I{_r}*(G{_r}-H{_r})'
+                    _calc_ws[f'L{_r}'].number_format = '0.00'
+                    _calc_ws[f'M{_r}'].number_format = '0.00'
                 _comparison.to_excel(_writer, sheet_name='5_3_LINE_Compare', index=False)
                 _labs.to_excel(_writer, sheet_name='All_LAB', index=False)
                 _paired.to_excel(_writer, sheet_name='Paired_LAB_LINE', index=False)
@@ -2427,6 +2478,18 @@ elif app_mode == "🎛️ Control Limit Calculator":
             add_table(_shift_range_table)
             doc.add_heading('5.2 依 Shift 反推 LAB 建議管制界限',level=2)
             add_table(_limits)
+            if not _backcalc_detail.empty:
+                doc.add_paragraph('表｜由歷史 Shift 至 LAB 建議界限之逐項計算')
+                add_table(_backcalc_detail, ['因子','Shift Min','Shift Max','LAB 實測 Min',
+                                             'LAB 實測 Max','採用中心 C','擴展係數 t','建議 LCL','建議 UCL'])
+                doc.add_paragraph('C = CLIP[−(Shift Min + Shift Max) / 2, LAB 實測 Min, LAB 實測 Max]；'
+                                  'LCL = C + t × (LAB 實測 Min − C)；'
+                                  'UCL = C + t × (LAB 實測 Max − C)。')
+                doc.add_paragraph('各因子代入公式（顯示小數二位，實際運算保留原始精度）：')
+                for _, row in _backcalc_formula.iterrows():
+                    doc.add_paragraph(f'{row["因子"]}：{row["補償中心公式"]}',style='Normal')
+                    doc.add_paragraph(f'   LCL：{row["LCL 代入公式"]}',style='Normal')
+                    doc.add_paragraph(f'   UCL：{row["UCL 代入公式"]}',style='Normal')
             doc.add_paragraph('計算：補償中心 = −(Shift Min + Shift Max)/2，限制於歷史合格 LAB 實測範圍。'
                               '從中心向 LAB 歷史範圍擴展，利用二分搜尋最大係數 t，使 LAB ΔE* 與 LINE Shift 保守上界均符合規格。')
             if _b_lo is not None and isinstance(_opt,dict) and 'scale' in _opt:
@@ -2451,7 +2514,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
 
         safe_color_name = re.sub(r"[^A-Za-z0-9_-]+", "_", str(color))
         report_state_key = "task3_export_payload"
-        report_identity = ("SIMPLE_SHIFT_BACKCALC_V1", uploaded_data_file.name, uploaded_data_file.size,
+        report_identity = ("SIMPLE_SHIFT_BACKCALC_FORMULA_V2", uploaded_data_file.name, uploaded_data_file.size,
                            uploaded_limit_file.name, uploaded_limit_file.size,
                            str(color), tuple(selected_years), tuple(selected_months),
                            float(lab_de_target), float(line_de_target))
