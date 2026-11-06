@@ -2547,21 +2547,13 @@ elif app_mode == "🎛️ Control Limit Calculator":
         st.markdown("---")
         st.markdown("### 📄 Export Task 3 Word Report")
         st.caption(
-            "The Word report contains two concise management tables and a traceable calculation appendix."
+            "The Word report retains the original statistical analysis, factor results, full three-chart page and original conclusion; supplementary Task 3 results and appendix follow."
         )
 
         def build_task3_word_report():
-            """Two management tables and a short conclusion, with traceable appendices."""
             doc = docx.Document()
-            sec = doc.sections[0]
-            sec.page_width = Mm(210); sec.page_height = Mm(297)
-            sec.top_margin = Mm(19); sec.bottom_margin = Mm(19)
-            sec.left_margin = Mm(18); sec.right_margin = Mm(18)
-            normal = doc.styles['Normal']
-            normal.font.name = 'Microsoft JhengHei'
-            normal.font.size = Pt(10)
-
             def add_table(frame, cols=None):
+                """Append supplementary Task 3 table, preserving original report tables."""
                 if frame is None or frame.empty:
                     doc.add_paragraph('本色號資料不足，無法提供有效計算結果。')
                     return
@@ -2582,144 +2574,276 @@ elif app_mode == "🎛️ Control Limit Calculator":
                             cells[k].text = '—' if pd.isna(value) else str(value)
                 doc.add_paragraph('')
 
-            # RESTORED: the original report's front sections were unintentionally
-            # removed when Task 3's concise management/appendix report was added.
-            # Keep the original statistics, method, factor reviews and trend charts
-            # BEFORE the new supplementary risk analysis.
-            head = doc.add_heading('Incoming LAB Control Limit Analysis Report', level=0)
-            head.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            doc.add_paragraph(f'Color Code: {color}    Analysis Date: {datetime.now():%Y-%m-%d %H:%M}')
+
+            # A4 portrait for the normal report pages
+            section = doc.sections[0]
+            section.orientation = WD_ORIENT.PORTRAIT
+            section.page_width = Mm(210)
+            section.page_height = Mm(297)
+            section.top_margin = Inches(0.55)
+            section.bottom_margin = Inches(0.55)
+            section.left_margin = Inches(0.60)
+            section.right_margin = Inches(0.60)
+
+            # Base font in Word only. This does not change Matplotlib chart fonts.
+            normal_style = doc.styles["Normal"]
+            normal_style.font.name = "Arial"
+            normal_style.font.size = Pt(10)
+
+            title = doc.add_heading("Incoming LAB Control Limit Analysis Report", level=0)
+            title.alignment = 1
+
+            p = doc.add_paragraph()
+            p.add_run("Color Code: ").bold = True
+            p.add_run(str(color))
+            p.add_run("\nAnalysis Date: ").bold = True
+            p.add_run(datetime.now().strftime("%Y-%m-%d %H:%M"))
+
             if not df.empty:
-                doc.add_paragraph(
-                    f'Data Period: {df["Time"].min():%Y-%m-%d} ~ {df["Time"].max():%Y-%m-%d}    '
-                    f'Batches: {df["製造批號"].nunique()}'
+                p.add_run("\nData Period: ").bold = True
+                p.add_run(
+                    f"{df['Time'].min().strftime('%Y-%m-%d')} to {df['Time'].max().strftime('%Y-%m-%d')}"
                 )
-            doc.add_heading('LAB / LINE 色差規格（依色號設定）', level=1)
-            add_table(pd.DataFrame([
-                {'檢驗階段':'LAB 進料', 'ΔE* 規格上限':f'≤ {lab_de_target:.2f}'},
-                {'檢驗階段':'LINE 產出', 'ΔE* 規格上限':f'≤ {line_de_target:.2f}'},
-            ]))
-            doc.add_heading('1. Analysis Objective', level=1)
+                p.add_run("\nTotal filtered batches: ").bold = True
+                p.add_run(str(df["製造批號"].nunique()))
+
+            doc.add_heading("1. Analysis Objective", level=1)
             doc.add_paragraph(
-                '分析同一製造批號之 LAB 入料及 LINE 產出色差趨勢；'
-                '使用 Standard Method 與 IQR 作為統計依據，'
-                '由使用者確認初始 LAB 管制界限，再進行 LINE 產出風險評估。'
+                "Determine a practical incoming LAB control range for ΔL*, Δa* and Δb*, and use the paired "
+                "LINE output from the same production batches to evaluate the downstream color trend. "
+                "The recommended LAB range is derived from the overlap between the Standard (Mean ± Kσ) "
+                "and IQR methods using LAB data associated with acceptable LINE output whenever current "
+                "LINE control limits are available."
             )
-            doc.add_heading('2. LAB Input Statistical Summary (±1.5σ)', level=1)
-            doc.add_paragraph('依製造批號計算 LAB 入料 Min、Max、平均值、標準差及 x̄ ± 1.5σ。')
-            add_table(task3_stats_df)
 
-            doc.add_heading('3. Analysis Method', level=1)
-            add_table(pd.DataFrame([
-                {'Method':'Standard Method', 'Calculation':'Mean ± K × σ', 'Purpose':'LAB 統計分布'},
-                {'Method':'IQR', 'Calculation':'Q1 − k × IQR ～ Q3 + k × IQR', 'Purpose':'降低極端值影響'},
-                {'Method':'Confirmed LAB', 'Calculation':'人工確認之 LCL / UCL', 'Purpose':'後續 LINE 風險分析基準'},
-                {'Method':'LAB→LINE', 'Calculation':'Pearson r, R², Shift = LINE − LAB', 'Purpose':'評估入料至產出之關係'},
-            ]))
+            doc.add_heading("2. LAB Input Statistical Summary (±1.5σ)", level=1)
+            doc.add_paragraph(
+                "This table summarizes LAB input data only. Min, Max, mean (x̄), standard deviation (σ), "
+                "and control limits are calculated at batch level. LCL/UCL are defined as x̄ ± 1.5σ."
+            )
+            stats_table = doc.add_table(rows=1, cols=7)
+            stats_table.style = "Table Grid"
+            stats_headers = [
+                "入料色差走向", "Min", "Max", "平均值 (x̄)", "標準差 (σ)",
+                "LCL (-1.5σ)", "UCL (+1.5σ)"
+            ]
+            for _i, _h in enumerate(stats_headers):
+                stats_table.rows[0].cells[_i].text = _h
 
-            doc.add_heading('4. Factor Results', level=1)
-            for _f in factors:
-                if _f not in calc_res:
+            for _, _r in task3_stats_df.iterrows():
+                _cells = stats_table.add_row().cells
+                _cells[0].text = str(_r["入料色差走向"])
+                for _j, _col in enumerate(stats_headers[1:], start=1):
+                    _val = _r[_col]
+                    _cells[_j].text = f"{float(_val):.3f}" if pd.notna(_val) else "-"
+
+            doc.add_heading("3. Analysis Method", level=1)
+            method_table = doc.add_table(rows=1, cols=3)
+            method_table.style = "Table Grid"
+            hdr = method_table.rows[0].cells
+            hdr[0].text = "Method"
+            hdr[1].text = "Calculation"
+            hdr[2].text = "Purpose"
+            method_rows = [
+                ("Standard", "Mean ± K × σ", "Evaluate LAB distribution using mean and standard deviation"),
+                ("IQR", "Q1 − k×IQR to Q3 + k×IQR", "Reduce sensitivity to extreme values"),
+                ("Recommended LAB", "Intersection of Standard and IQR", "Candidate incoming LAB control window"),
+                ("LAB→LINE", "Pearson r and R²", "Evaluate the relationship between incoming LAB and LINE output"),
+            ]
+            for m, calc, purpose in method_rows:
+                cells = method_table.add_row().cells
+                cells[0].text = m
+                cells[1].text = calc
+                cells[2].text = purpose
+
+            doc.add_heading("4. Factor Results", level=1)
+
+            for factor in factors:
+                if factor not in calc_res:
                     continue
-                _r = calc_res[_f]
-                doc.add_heading(f'4.{factors.index(_f)+1} {delta_label(_f)} Analysis', level=2)
-                def _fmt_pair(a,b):
-                    if a is None or b is None or pd.isna(a) or pd.isna(b):
-                        return 'N/A'
-                    return f'{float(a):.2f} ~ {float(b):.2f}'
-                _item_rows = [
-                    ('Current LAB limit (sheet)', _fmt_pair(_r['lab_lcl_sheet'], _r['lab_ucl_sheet'])),
-                    ('Current LINE limit (sheet)', _fmt_pair(_r['line_lcl_sheet'], _r['line_ucl_sheet'])),
-                    (f'Standard LAB (K={_r["sig"]:.2f})', _fmt_pair(_r['std_lcl'],_r['std_ucl'])),
-                    (f'IQR LAB (k={_r["iqr_k"]:.2f})', _fmt_pair(_r['iqr_lcl'],_r['iqr_ucl'])),
-                    ('Statistical recommendation (before manual edits)', _fmt_pair(_r['rec_lcl'],_r['rec_ucl'])),
-                    ('Paired batches',str(len(_r['pair']))),
-                    ('LAB data used',str(len(_r['safe_lab']))),
-                    ('LAB→LINE r',f'{_r["r"]:.2f}' if pd.notna(_r['r']) else 'N/A'),
-                    ('LAB→LINE R²',f'{_r["r2"]:.2f}' if pd.notna(_r['r2']) else 'N/A'),
+                res = calc_res[factor]
+                doc.add_heading(f"4.{factors.index(factor)+1} {delta_label(factor)} Analysis", level=2)
+
+                result_table = doc.add_table(rows=1, cols=2)
+                result_table.style = "Table Grid"
+                h = result_table.rows[0].cells
+                h[0].text = "Item"
+                h[1].text = "Result"
+
+                lab_sheet = (
+                    f"{res['lab_lcl_sheet']:.3f} ~ {res['lab_ucl_sheet']:.3f}"
+                    if res['lab_lcl_sheet'] is not None and res['lab_ucl_sheet'] is not None else "Not set"
+                )
+                line_sheet = (
+                    f"{res['line_lcl_sheet']:.3f} ~ {res['line_ucl_sheet']:.3f}"
+                    if res['line_lcl_sheet'] is not None and res['line_ucl_sheet'] is not None else "Not set"
+                )
+                rec = (
+                    f"{res['rec_lcl']:.3f} ~ {res['rec_ucl']:.3f}"
+                    if res['rec_lcl'] is not None and res['rec_ucl'] is not None else "No overlap"
+                )
+                rows = [
+                    ("Current LAB limit", lab_sheet),
+                    ("Current LINE limit", line_sheet),
+                    (f"Standard LAB ({res['sig']:.1f}σ)", f"{res['std_lcl']:.3f} ~ {res['std_ucl']:.3f}"),
+                    (f"IQR LAB (k={res['iqr_k']:.2f})", f"{res['iqr_lcl']:.3f} ~ {res['iqr_ucl']:.3f}"),
+                    ("Recommended LAB", rec),
+                    ("Paired batches", str(len(res['pair']))),
+                    ("LAB data used", str(len(res['safe_lab']))),
+                    ("LAB→LINE r", f"{res['r']:.3f}" if pd.notna(res['r']) else "N/A"),
+                    ("LAB→LINE R²", f"{res['r2']:.3f}" if pd.notna(res['r2']) else "N/A"),
                 ]
-                add_table(pd.DataFrame(_item_rows, columns=['Item','Result']))
-                doc.add_paragraph(str(_r.get('filter_note', '')))
+                for item, value in rows:
+                    c = result_table.add_row().cells
+                    c[0].text = item
+                    c[1].text = value
 
-            doc.add_heading('Recommended Incoming LAB Control Limit Summary', level=1)
-            _summary_rows = []
-            for _i, _f in enumerate(factors):
-                if _f not in calc_res:
-                    continue
-                _r = calc_res[_f]
-                _summary_rows.append({
-                    'Factor':delta_label(_f), 'Paired n':len(_r['pair']),
-                    'LAB n':len(_r['safe_lab']), 'Mean':_r['m'],'σ':_r['s'],
-                    'Confirmed LCL':float(_start_lcl[_i]),
-                    'Confirmed UCL':float(_start_ucl[_i]),
-                    'R²':_r['r2'],
-                })
-            add_table(pd.DataFrame(_summary_rows))
-            doc.add_paragraph('Confirmed LCL / UCL 為人工修正值，原始 Standard 與 IQR 結果保留供比較。')
+                doc.add_paragraph(res['filter_note'])
 
-            # Restore the original dedicated LAB/LINE trend-chart page, rather
-            # than relying on the unused report_chart_buffers cache.
-            _report_figures = {}
-            for _f in factors:
-                if _f not in calc_res or calc_res[_f]['pair'].empty:
-                    continue
-                _fig = build_task3_report_chart(calc_res[_f]['pair'], _f)
-                _pic = io.BytesIO()
-                _fig.savefig(_pic, format='png', dpi=320,
-                             bbox_inches='tight', facecolor='white')
-                plt.close(_fig)
-                _report_figures[_f] = _pic.getvalue()
-            if all(_f in _report_figures for _f in factors):
-                _chart_section = doc.add_section(WD_SECTION.NEW_PAGE)
-                _chart_section.orientation = WD_ORIENT.LANDSCAPE
-                _chart_section.page_width, _chart_section.page_height = Mm(297), Mm(210)
-                _chart_section.top_margin = Inches(0.28)
-                _chart_section.bottom_margin = Inches(0.28)
-                _chart_section.left_margin = Inches(0.30)
-                _chart_section.right_margin = Inches(0.30)
-                _pt = doc.add_paragraph()
-                _pt.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                _title = _pt.add_run(
-                    f'ΔL*, Δa* and Δb* LAB Input vs LINE Output Trend ({color})')
-                _title.bold = True; _title.font.size = Pt(13)
-                _chart_table = doc.add_table(rows=2, cols=2)
-                _chart_table.autofit = False
-                _cl = _chart_table.cell(0,0)
-                _cr = _chart_table.cell(0,1)
-                _cb = _chart_table.cell(1,0).merge(_chart_table.cell(1,1))
-                for _c in (_cl,_cr,_cb):
-                    _c.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-                _cl.paragraphs[0].add_run().add_picture(
-                    io.BytesIO(_report_figures['ΔL']),width=Inches(4.85))
-                _cr.paragraphs[0].add_run().add_picture(
-                    io.BytesIO(_report_figures['Δa']),width=Inches(4.85))
-                _cb.paragraphs[0].add_run().add_picture(
-                    io.BytesIO(_report_figures['Δb']),width=Inches(5.45))
-                _note = doc.add_paragraph('Blue: LAB Input; Orange: LINE Output. '
-                                          'Horizontal axis: chronological batch sequence.')
-                _note.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                _portrait = doc.add_section(WD_SECTION.NEW_PAGE)
-                _portrait.orientation = WD_ORIENT.PORTRAIT
-                _portrait.page_width, _portrait.page_height = Mm(210), Mm(297)
-                _portrait.top_margin, _portrait.bottom_margin = Mm(19), Mm(19)
-                _portrait.left_margin, _portrait.right_margin = Mm(18), Mm(18)
-            else:
-                doc.add_paragraph('LAB–LINE 趨勢圖：部分因子無可繪製配對資料。')
+                # Charts are placed together on one dedicated A4 landscape page below.
 
-            doc.add_heading('Derived Incoming LAB ΔE* Boundary', level=1)
-            _std_de = math.sqrt(dE_std_sq)
-            _iqr_de = math.sqrt(dE_iqr_sq)
-            add_table(pd.DataFrame([
-                {'Item':'Standard-derived LAB ΔE*', 'Value':_std_de},
-                {'Item':'IQR-derived LAB ΔE*', 'Value':_iqr_de},
-                {'Item':'Manually confirmed LAB ΔE*', 'Value':_manual_peak},
-                {'Item':'LAB specification', 'Value':lab_de_target},
-                {'Item':'LINE specification', 'Value':line_de_target},
-            ]))
-            doc.add_paragraph('以上為 LAB 三因子界限最不利組合之理論 ΔE*，非單批實際量測結果。')
+            if len(calc_res) == 3:
+                doc.add_heading("5. Recommended Incoming LAB Control Limit Summary", level=1)
+                sum_table = doc.add_table(rows=1, cols=8)
+                sum_table.style = "Table Grid"
+                headers = [
+                    "Factor", "Paired n", "LAB n", "Mean", "σ",
+                    "Recommended LCL", "Recommended UCL", "R²"
+                ]
+                for i, htxt in enumerate(headers):
+                    sum_table.rows[0].cells[i].text = htxt
 
-            doc.add_heading('5. 補充分析｜LAB 入料管制界限初步建議與 LINE 品質驗證', level=1)
+                for factor in factors:
+                    res = calc_res[factor]
+                    row = sum_table.add_row().cells
+                    vals = [
+                        factor,
+                        str(len(res['pair'])),
+                        str(len(res['safe_lab'])),
+                        f"{res['m']:.3f}",
+                        f"{res['s']:.3f}",
+                        f"{res['rec_lcl']:.3f}" if res['rec_lcl'] is not None else "N/A",
+                        f"{res['rec_ucl']:.3f}" if res['rec_ucl'] is not None else "N/A",
+                        f"{res['r2']:.3f}" if pd.notna(res['r2']) else "N/A",
+                    ]
+                    for i, value in enumerate(vals):
+                        row[i].text = value
 
+                # One-page high-resolution chart overview, arranged like the user's reference:
+                # ΔL* top-left, Δa* top-right, Δb* centered below.
+                if all(f in report_chart_buffers for f in factors):
+                    chart_section = doc.add_section(WD_SECTION.NEW_PAGE)
+                    chart_section.orientation = WD_ORIENT.LANDSCAPE
+                    chart_section.page_width = Mm(297)
+                    chart_section.page_height = Mm(210)
+                    chart_section.top_margin = Inches(0.28)
+                    chart_section.bottom_margin = Inches(0.28)
+                    chart_section.left_margin = Inches(0.30)
+                    chart_section.right_margin = Inches(0.30)
+
+                    p_title = doc.add_paragraph()
+                    p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    r_title = p_title.add_run(
+                        f"Figure 2  ΔL*, Δa* and Δb* LAB Input vs LINE Output Trend ({color})"
+                    )
+                    r_title.bold = True
+                    r_title.font.size = Pt(13)
+
+                    chart_table = doc.add_table(rows=2, cols=2)
+                    chart_table.autofit = False
+                    tl = chart_table.cell(0, 0)
+                    tr = chart_table.cell(0, 1)
+                    bot = chart_table.cell(1, 0).merge(chart_table.cell(1, 1))
+
+                    for cell in [tl, tr, bot]:
+                        cell.vertical_alignment = 1
+                        cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+                    tl.paragraphs[0].add_run().add_picture(
+                        io.BytesIO(report_chart_buffers["ΔL"]), width=Inches(4.85)
+                    )
+                    tr.paragraphs[0].add_run().add_picture(
+                        io.BytesIO(report_chart_buffers["Δa"]), width=Inches(4.85)
+                    )
+                    bot.paragraphs[0].add_run().add_picture(
+                        io.BytesIO(report_chart_buffers["Δb"]), width=Inches(5.45)
+                    )
+
+                    note = doc.add_paragraph(
+                        "Note: X-axis shows batch sequence in chronological order. "
+                        "The blue line is LAB Input and the orange line is LINE Output."
+                    )
+                    note.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    for run in note.runs:
+                        run.font.size = Pt(9)
+
+                    # Continue the remaining report on A4 portrait pages.
+                    portrait_section = doc.add_section(WD_SECTION.NEW_PAGE)
+                    portrait_section.orientation = WD_ORIENT.PORTRAIT
+                    portrait_section.page_width = Mm(210)
+                    portrait_section.page_height = Mm(297)
+                    portrait_section.top_margin = Inches(0.55)
+                    portrait_section.bottom_margin = Inches(0.55)
+                    portrait_section.left_margin = Inches(0.60)
+                    portrait_section.right_margin = Inches(0.60)
+
+                # Derived ΔE* results, using the same values already calculated in the app.
+                dE_std_report = math.sqrt(dE_std_sq)
+                dE_iqr_report = math.sqrt(dE_iqr_sq)
+                valid_rec = all(
+                    calc_res[f]['rec_lcl'] is not None and calc_res[f]['rec_ucl'] is not None
+                    for f in factors
+                )
+                if valid_rec:
+                    dE_rec_report = math.sqrt(sum(
+                        max(abs(calc_res[f]['rec_lcl']), abs(calc_res[f]['rec_ucl'])) ** 2
+                        for f in factors
+                    ))
+                else:
+                    dE_rec_report = None
+
+                doc.add_heading("6. Derived Incoming LAB ΔE* Boundary", level=1)
+                de_table = doc.add_table(rows=1, cols=2)
+                de_table.style = "Table Grid"
+                de_table.rows[0].cells[0].text = "Item"
+                de_table.rows[0].cells[1].text = "Value"
+                de_rows = [
+                    ("Standard-derived ΔE*", f"{dE_std_report:.3f}"),
+                    ("IQR-derived ΔE*", f"{dE_iqr_report:.3f}"),
+                    ("Recommended ΔE*", f"{dE_rec_report:.3f}" if dE_rec_report is not None else "N/A"),
+                    ("Current LAB ΔE* target", f"≤ {lab_de_target:.2f}"),
+                    ("Current LINE ΔE* target", f"≤ {line_de_target:.2f}"),
+                ]
+                for item, value in de_rows:
+                    c = de_table.add_row().cells
+                    c[0].text = item
+                    c[1].text = value
+
+                doc.add_heading("7. Conclusion", level=1)
+                conclusion_parts = []
+                for factor in factors:
+                    res = calc_res[factor]
+                    if res['rec_lcl'] is not None and res['rec_ucl'] is not None:
+                        conclusion_parts.append(
+                            f"{factor}: recommended incoming LAB range {res['rec_lcl']:.3f} to {res['rec_ucl']:.3f}"
+                        )
+                if conclusion_parts:
+                    doc.add_paragraph(
+                        "Based on the current paired historical data, " + "; ".join(conclusion_parts) + ". "
+                        "These ranges should be treated as candidate incoming control limits and continuously verified "
+                        "against future LINE output stability as more paired batches become available."
+                    )
+                else:
+                    doc.add_paragraph(
+                        "A complete recommended incoming LAB range could not be established for all factors from the "
+                        "current data. Additional paired LAB and LINE data are required before finalizing the incoming limits."
+                    )
+
+            # ADDITION ONLY: the legacy 1–7 sections, original analysis tables,
+            # original dedicated three-chart landscape page and conclusion above
+            # are deliberately preserved without replacement.
+            doc.add_page_break()
+            doc.add_heading('8. 補充分析｜LAB 入料管制界限初步建議與 LINE 品質驗證', level=1)
             doc.add_paragraph(f'塗料編號：{color}；LAB ΔE* 規格 ≤ {lab_de_target:.2f}；'
                               f'LINE ΔE* 規格 ≤ {line_de_target:.2f}。')
             doc.add_paragraph('本研究以人工確認之初始界限（可參考 IQR 與標準差法）為比較基準，並依歷史 LAB–LINE 色差偏移，'
@@ -2783,11 +2907,21 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 add_table(_case_audit['source'])
                 add_table(_case_audit['prediction'])
             doc.add_paragraph('後續需累積更多實際生產數據，再評估界限之適用性與 LINE 產出品質風險。')
-            buffer = io.BytesIO(); doc.save(buffer); return buffer.getvalue()
+
+            # Footer
+            for sec in doc.sections:
+                footer = sec.footer.paragraphs[0]
+                footer.text = "SPC Color Dashboard - Task 3 Incoming LAB Control Limit Analysis"
+                footer.alignment = 1
+
+            report_buf = io.BytesIO()
+            doc.save(report_buf)
+            report_buf.seek(0)
+            return report_buf.getvalue()
 
         safe_color_name = re.sub(r"[^A-Za-z0-9_-]+", "_", str(color))
         report_state_key = "task3_export_payload"
-        report_identity = ("USER_CONFIRMED_INPUT_LIMITS_V1", tuple(_start_lcl), tuple(_start_ucl), uploaded_data_file.name, uploaded_data_file.size,
+        report_identity = ("ORIGINAL_WORD_COMPLETE_RESTORED_V2", tuple(_start_lcl), tuple(_start_ucl), uploaded_data_file.name, uploaded_data_file.size,
                            uploaded_limit_file.name, uploaded_limit_file.size,
                            str(color), tuple(selected_years), tuple(selected_months),
                            float(lab_de_target), float(line_de_target))
