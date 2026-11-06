@@ -2582,7 +2582,144 @@ elif app_mode == "🎛️ Control Limit Calculator":
                             cells[k].text = '—' if pd.isna(value) else str(value)
                 doc.add_paragraph('')
 
-            doc.add_heading('5. LAB 入料管制界限初步建議與 LINE 品質驗證', level=1)
+            # RESTORED: the original report's front sections were unintentionally
+            # removed when Task 3's concise management/appendix report was added.
+            # Keep the original statistics, method, factor reviews and trend charts
+            # BEFORE the new supplementary risk analysis.
+            head = doc.add_heading('Incoming LAB Control Limit Analysis Report', level=0)
+            head.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            doc.add_paragraph(f'Color Code: {color}    Analysis Date: {datetime.now():%Y-%m-%d %H:%M}')
+            if not df.empty:
+                doc.add_paragraph(
+                    f'Data Period: {df["Time"].min():%Y-%m-%d} ~ {df["Time"].max():%Y-%m-%d}    '
+                    f'Batches: {df["製造批號"].nunique()}'
+                )
+            doc.add_heading('LAB / LINE 色差規格（依色號設定）', level=1)
+            add_table(pd.DataFrame([
+                {'檢驗階段':'LAB 進料', 'ΔE* 規格上限':f'≤ {lab_de_target:.2f}'},
+                {'檢驗階段':'LINE 產出', 'ΔE* 規格上限':f'≤ {line_de_target:.2f}'},
+            ]))
+            doc.add_heading('1. Analysis Objective', level=1)
+            doc.add_paragraph(
+                '分析同一製造批號之 LAB 入料及 LINE 產出色差趨勢；'
+                '使用 Standard Method 與 IQR 作為統計依據，'
+                '由使用者確認初始 LAB 管制界限，再進行 LINE 產出風險評估。'
+            )
+            doc.add_heading('2. LAB Input Statistical Summary (±1.5σ)', level=1)
+            doc.add_paragraph('依製造批號計算 LAB 入料 Min、Max、平均值、標準差及 x̄ ± 1.5σ。')
+            add_table(task3_stats_df)
+
+            doc.add_heading('3. Analysis Method', level=1)
+            add_table(pd.DataFrame([
+                {'Method':'Standard Method', 'Calculation':'Mean ± K × σ', 'Purpose':'LAB 統計分布'},
+                {'Method':'IQR', 'Calculation':'Q1 − k × IQR ～ Q3 + k × IQR', 'Purpose':'降低極端值影響'},
+                {'Method':'Confirmed LAB', 'Calculation':'人工確認之 LCL / UCL', 'Purpose':'後續 LINE 風險分析基準'},
+                {'Method':'LAB→LINE', 'Calculation':'Pearson r, R², Shift = LINE − LAB', 'Purpose':'評估入料至產出之關係'},
+            ]))
+
+            doc.add_heading('4. Factor Results', level=1)
+            for _f in factors:
+                if _f not in calc_res:
+                    continue
+                _r = calc_res[_f]
+                doc.add_heading(f'4.{factors.index(_f)+1} {delta_label(_f)} Analysis', level=2)
+                def _fmt_pair(a,b):
+                    if a is None or b is None or pd.isna(a) or pd.isna(b):
+                        return 'N/A'
+                    return f'{float(a):.2f} ~ {float(b):.2f}'
+                _item_rows = [
+                    ('Current LAB limit (sheet)', _fmt_pair(_r['lab_lcl_sheet'], _r['lab_ucl_sheet'])),
+                    ('Current LINE limit (sheet)', _fmt_pair(_r['line_lcl_sheet'], _r['line_ucl_sheet'])),
+                    (f'Standard LAB (K={_r["sig"]:.2f})', _fmt_pair(_r['std_lcl'],_r['std_ucl'])),
+                    (f'IQR LAB (k={_r["iqr_k"]:.2f})', _fmt_pair(_r['iqr_lcl'],_r['iqr_ucl'])),
+                    ('Statistical recommendation (before manual edits)', _fmt_pair(_r['rec_lcl'],_r['rec_ucl'])),
+                    ('Paired batches',str(len(_r['pair']))),
+                    ('LAB data used',str(len(_r['safe_lab']))),
+                    ('LAB→LINE r',f'{_r["r"]:.2f}' if pd.notna(_r['r']) else 'N/A'),
+                    ('LAB→LINE R²',f'{_r["r2"]:.2f}' if pd.notna(_r['r2']) else 'N/A'),
+                ]
+                add_table(pd.DataFrame(_item_rows, columns=['Item','Result']))
+                doc.add_paragraph(str(_r.get('filter_note', '')))
+
+            doc.add_heading('Recommended Incoming LAB Control Limit Summary', level=1)
+            _summary_rows = []
+            for _i, _f in enumerate(factors):
+                if _f not in calc_res:
+                    continue
+                _r = calc_res[_f]
+                _summary_rows.append({
+                    'Factor':delta_label(_f), 'Paired n':len(_r['pair']),
+                    'LAB n':len(_r['safe_lab']), 'Mean':_r['m'],'σ':_r['s'],
+                    'Confirmed LCL':float(_start_lcl[_i]),
+                    'Confirmed UCL':float(_start_ucl[_i]),
+                    'R²':_r['r2'],
+                })
+            add_table(pd.DataFrame(_summary_rows))
+            doc.add_paragraph('Confirmed LCL / UCL 為人工修正值，原始 Standard 與 IQR 結果保留供比較。')
+
+            # Restore the original dedicated LAB/LINE trend-chart page, rather
+            # than relying on the unused report_chart_buffers cache.
+            _report_figures = {}
+            for _f in factors:
+                if _f not in calc_res or calc_res[_f]['pair'].empty:
+                    continue
+                _fig = build_task3_report_chart(calc_res[_f]['pair'], _f)
+                _pic = io.BytesIO()
+                _fig.savefig(_pic, format='png', dpi=320,
+                             bbox_inches='tight', facecolor='white')
+                plt.close(_fig)
+                _report_figures[_f] = _pic.getvalue()
+            if all(_f in _report_figures for _f in factors):
+                _chart_section = doc.add_section(WD_SECTION.NEW_PAGE)
+                _chart_section.orientation = WD_ORIENT.LANDSCAPE
+                _chart_section.page_width, _chart_section.page_height = Mm(297), Mm(210)
+                _chart_section.top_margin = Inches(0.28)
+                _chart_section.bottom_margin = Inches(0.28)
+                _chart_section.left_margin = Inches(0.30)
+                _chart_section.right_margin = Inches(0.30)
+                _pt = doc.add_paragraph()
+                _pt.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                _title = _pt.add_run(
+                    f'ΔL*, Δa* and Δb* LAB Input vs LINE Output Trend ({color})')
+                _title.bold = True; _title.font.size = Pt(13)
+                _chart_table = doc.add_table(rows=2, cols=2)
+                _chart_table.autofit = False
+                _cl = _chart_table.cell(0,0)
+                _cr = _chart_table.cell(0,1)
+                _cb = _chart_table.cell(1,0).merge(_chart_table.cell(1,1))
+                for _c in (_cl,_cr,_cb):
+                    _c.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                _cl.paragraphs[0].add_run().add_picture(
+                    io.BytesIO(_report_figures['ΔL']),width=Inches(4.85))
+                _cr.paragraphs[0].add_run().add_picture(
+                    io.BytesIO(_report_figures['Δa']),width=Inches(4.85))
+                _cb.paragraphs[0].add_run().add_picture(
+                    io.BytesIO(_report_figures['Δb']),width=Inches(5.45))
+                _note = doc.add_paragraph('Blue: LAB Input; Orange: LINE Output. '
+                                          'Horizontal axis: chronological batch sequence.')
+                _note.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                _portrait = doc.add_section(WD_SECTION.NEW_PAGE)
+                _portrait.orientation = WD_ORIENT.PORTRAIT
+                _portrait.page_width, _portrait.page_height = Mm(210), Mm(297)
+                _portrait.top_margin, _portrait.bottom_margin = Mm(19), Mm(19)
+                _portrait.left_margin, _portrait.right_margin = Mm(18), Mm(18)
+            else:
+                doc.add_paragraph('LAB–LINE 趨勢圖：部分因子無可繪製配對資料。')
+
+            doc.add_heading('Derived Incoming LAB ΔE* Boundary', level=1)
+            _std_de = math.sqrt(dE_std_sq)
+            _iqr_de = math.sqrt(dE_iqr_sq)
+            add_table(pd.DataFrame([
+                {'Item':'Standard-derived LAB ΔE*', 'Value':_std_de},
+                {'Item':'IQR-derived LAB ΔE*', 'Value':_iqr_de},
+                {'Item':'Manually confirmed LAB ΔE*', 'Value':_manual_peak},
+                {'Item':'LAB specification', 'Value':lab_de_target},
+                {'Item':'LINE specification', 'Value':line_de_target},
+            ]))
+            doc.add_paragraph('以上為 LAB 三因子界限最不利組合之理論 ΔE*，非單批實際量測結果。')
+
+            doc.add_heading('5. 補充分析｜LAB 入料管制界限初步建議與 LINE 品質驗證', level=1)
+
             doc.add_paragraph(f'塗料編號：{color}；LAB ΔE* 規格 ≤ {lab_de_target:.2f}；'
                               f'LINE ΔE* 規格 ≤ {line_de_target:.2f}。')
             doc.add_paragraph('本研究以人工確認之初始界限（可參考 IQR 與標準差法）為比較基準，並依歷史 LAB–LINE 色差偏移，'
