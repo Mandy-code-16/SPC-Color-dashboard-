@@ -877,6 +877,63 @@ def task3_stress_audit(lo, hi, shift_df, line_spec):
     return detail, detail.iloc[0].to_dict() if not detail.empty else None
 
 
+
+def task3_worst_case_calculation_tables(case, paired_df, line_spec, box_lo, box_hi):
+    """Transparent audit: same-source measured LAB/LINE -> shift -> predicted LINE.
+
+    All calculations use full-precision values. Display rounding happens only in UI.
+    """
+    if case is None or paired_df is None or paired_df.empty or box_lo is None or box_hi is None:
+        return None
+    batch = str(case['Shift 來源批號'])
+    matches = paired_df.loc[paired_df['製造批號'].astype(str) == batch]
+    if len(matches) != 1:
+        return None
+    source = matches.iloc[0]
+    keys = ('ΔL', 'Δa', 'Δb')
+    input_l = np.array([float(source[f'LAB_{j}']) for j in keys])
+    output_l = np.array([float(source[f'LINE_{j}']) for j in keys])
+    shifts = output_l - input_l
+    worst_lab = np.array([float(case[f'最不利 LAB {j}*']) for j in keys])
+    predicted = worst_lab + shifts
+    square = predicted ** 2
+    de = float(np.sqrt(square.sum()))
+    margin = float(line_spec) - de
+    source_table = pd.DataFrame([
+        {'色差因子': f'{k}*', '來源 LAB 實測值':input_l[i], '來源 LINE 實測值':output_l[i],
+         'Shift = LINE − LAB':shifts[i], '計算公式':f'{output_l[i]:.8f} − ({input_l[i]:.8f})'}
+        for i,k in enumerate(keys)
+    ])
+    prediction_table = pd.DataFrame([
+        {'色差因子':f'{k}*', '候選 LAB 最不利點 (A)':worst_lab[i], '來源 Shift (B)':shifts[i],
+         'LINE 預測值 (A+B)':predicted[i], '預測 LINE 平方':square[i],
+         '計算公式':f'({worst_lab[i]:.8f} + ({shifts[i]:.8f}))²'}
+        for i,k in enumerate(keys)
+    ])
+    totals_table = pd.DataFrame([
+        {'驗證項目':'Shift 來源批號', '計算公式 / 資料來源':'配對實測 LAB / LINE → SHIFT = LINE − LAB', '計算結果':batch},
+        {'驗證項目':'候選 LAB ΔE*', '計算公式 / 資料來源':'SQRT(' + ' + '.join(f'({x:.8f})²' for x in worst_lab) + ')', '計算結果':float(np.linalg.norm(worst_lab))},
+        {'驗證項目':'預測 LINE ΔE*', '計算公式 / 資料來源':'SQRT(' + ' + '.join(f'({x:.8f})²' for x in predicted) + ')', '計算結果':de},
+        {'驗證項目':'LINE ΔE* 規格', '計算公式 / 資料來源':'使用者輸入 LINE 規格上限', '計算結果':float(line_spec)},
+        {'驗證項目':'LINE 規格餘裕', '計算公式 / 資料來源':f'{float(line_spec):.8f} − ({de:.8f})', '計算結果':margin},
+        {'驗證項目':'最不利情境判定', '計算公式 / 資料來源':'全精度 LINE ΔE* ≤ LINE 規格', '計算結果':'符合歷史情境' if de <= float(line_spec)+1e-9 else '歷史情境超規'},
+    ])
+    # Display all 8 extreme LAB corners for THIS worst historical shift.
+    # Global worst comes from comparing all historical shifts x 8 corners.
+    from itertools import product
+    corners=[]
+    for flags in product((0,1),repeat=3):
+        lab = np.where(np.asarray(flags,dtype=bool), np.asarray(box_hi,float), np.asarray(box_lo,float))
+        line = lab + shifts
+        corners.append({'界限組合':''.join('U' if flag else 'L' for flag in flags),
+                        'LAB ΔL*':lab[0], 'LAB Δa*':lab[1], 'LAB Δb*':lab[2],
+                        'LINE ΔL*':line[0], 'LINE Δa*':line[1], 'LINE Δb*':line[2],
+                        'LINE ΔE*':float(np.linalg.norm(line)),
+                        'LINE 判定':'OK' if np.linalg.norm(line) <= line_spec+1e-9 else 'NG'})
+    return {'source':source_table, 'prediction':prediction_table, 'verification':totals_table,
+            'corners':pd.DataFrame(corners), 'batch':batch, 'de':de, 'margin':margin}
+
+
 def task3_shift_summary(shift_df):
     rows = []
     for factor in ('ΔL', 'Δa', 'Δb'):
@@ -2101,7 +2158,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
     st.markdown('## LAB 入料管制界限評估與改善')
     st.caption('分析順序：IQR 適用性 → LAB–LINE Shift → 以 LINE 風險最佳化 LAB 界限 → LINE 風險驗證 → 管制建議。歷史保留批數僅供參考，不作為最佳化目標。')
     _flow = None; _check = None; _limits = None; _summary = None; _risk = None; _conclusion = None
-    _shift_stats = None; _stress_initial = None; _stress_proposed = None; _worst_initial_case = None; _worst_proposed_case = None; _proposed_margin = np.nan; _paired = None; _valid_paired = None
+    _case_audit = None; _shift_stats = None; _stress_initial = None; _stress_proposed = None; _worst_initial_case = None; _worst_proposed_case = None; _proposed_margin = np.nan; _paired = None; _valid_paired = None
     _factors = ('ΔL', 'Δa', 'Δb')
     _valid_iqr = all(f in calc_res and np.isfinite(calc_res[f].get('iqr_lcl', np.nan))
                      and np.isfinite(calc_res[f].get('iqr_ucl', np.nan))
@@ -2289,6 +2346,30 @@ elif app_mode == "🎛️ Control Limit Calculator":
                          f'預測 LINE = ({_wc["預測 LINE ΔL*"]:.4f}, {_wc["預測 LINE Δa*"]:.4f}, {_wc["預測 LINE Δb*"]:.4f})。')
                 if _proposed_margin < 0.01 * line_de_target:
                     st.warning(f'候選界限之 LINE 餘裕僅 {_proposed_margin:.4f}，接近規格邊界；尚未包含未觀測到的 Shift 變動及測量不確定性，不宜宣稱保證安全。')
+            # Traceability: three readable formula tables, calculated from original
+            # measured data of the worst-shift source batch, NOT fabricated values.
+            if _worst_proposed_case is not None and _b_lo is not None:
+                _case_audit = task3_worst_case_calculation_tables(
+                    _worst_proposed_case, _valid_paired, line_de_target, _b_lo, _b_hi)
+                if _case_audit is not None:
+                    st.markdown('#### 表1｜最不利 Shift 來源批次：實測值與計算')
+                    st.caption(f'資料來源：製造批號 {_case_audit["batch"]}。來源 LAB / LINE 取同一批之三因子實測平均；Shift = LINE − LAB。')
+                    st.dataframe(_case_audit['source'].style.format(precision=6),
+                        use_container_width=True, hide_index=True)
+                    st.markdown('#### 表2｜候選 LAB 界限點與預測 LINE 計算')
+                    st.caption('每一因子：LINE 預測值 = 候選 LAB 最不利點 + 該批歷史 Shift；平方後再加總開根號。')
+                    st.dataframe(_case_audit['prediction'].style.format(precision=6),
+                        use_container_width=True, hide_index=True)
+                    st.markdown('#### 表3｜LINE ΔE* 計算與規格驗證')
+                    st.dataframe(_case_audit['verification'],use_container_width=True,hide_index=True)
+                    st.caption('所有判定使用未四捨五入的原始數字；畫面數字只為顯示而四捨五入。'
+                        '此結果僅檢驗已觀察的 Shift 情境，非未來製程安全保證。')
+                    with st.expander('檢查 8 個 LAB 界限角落（來源批次 Shift）',expanded=False):
+                        st.dataframe(_case_audit['corners'].style.format(precision=6),
+                            use_container_width=True,hide_index=True)
+                        st.caption('最不利來源批次係由所有合格 LAB 完整配對批次的 Shift，各自配合 8 個角落求出最大 LINE ΔE* 後選出。')
+                else:
+                    st.warning('無法取得最不利 Shift 來源批次的完整實測 LAB / LINE 數據，暫不顯示推算表。')
             with st.expander('逐批歷史 Shift 最不利 LINE 情境（可下載 Excel）', expanded=False):
                 st.markdown('**原始 IQR 界限**')
                 st.dataframe(_stress_initial.style.format(precision=4),use_container_width=True,hide_index=True)
@@ -2333,6 +2414,11 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 if _shift_stats is not None: _shift_stats.to_excel(_writer,index=False,sheet_name='Step2_Shift_Summary')
                 if _stress_initial is not None: _stress_initial.to_excel(_writer,index=False,sheet_name='Step4_IQR_Stress')
                 if _stress_proposed is not None: _stress_proposed.to_excel(_writer,index=False,sheet_name='Step4_Proposed_Stress')
+                if _case_audit is not None:
+                    _case_audit['source'].to_excel(_writer,index=False,sheet_name='Step4_Shift_Source')
+                    _case_audit['prediction'].to_excel(_writer,index=False,sheet_name='Step4_LINE_Calculation')
+                    _case_audit['verification'].to_excel(_writer,index=False,sheet_name='Step4_Risk_Verification')
+                    _case_audit['corners'].to_excel(_writer,index=False,sheet_name='Step4_Eight_Corners')
                 _limits.to_excel(_writer,index=False,sheet_name='Step3_Proposed_Limits')
                 _risk.to_excel(_writer,index=False,sheet_name='Step4_LINE_Risk')
                 _summary.to_excel(_writer,index=False,sheet_name='LAB_Counts_Reference')
@@ -2693,6 +2779,31 @@ elif app_mode == "🎛️ Control Limit Calculator":
                         f'LAB 點 ({_case["最不利 LAB ΔL*"]:.4f}, {_case["最不利 LAB Δa*"]:.4f}, {_case["最不利 LAB Δb*"]:.4f})；'
                         f'Shift ({_case["Shift ΔL*"]:.4f}, {_case["Shift Δa*"]:.4f}, {_case["Shift Δb*"]:.4f})；'
                         f'預測 LINE ΔE* {_case["最不利 LINE ΔE*"]:.4f}；LINE 規格餘裕 {_case["LINE 規格餘裕"]:.4f}。')
+            if _case_audit is not None:
+                doc.add_heading('表1｜最不利 Shift 來源：歷史 LAB / LINE 實測與公式',level=2)
+                doc.add_paragraph(f'資料來源：製造批號 {_case_audit["batch"]}；Shift_j = LINE 實測_j − LAB 實測_j。')
+                _tb=doc.add_table(rows=1,cols=5);_tb.style='Table Grid'
+                for j,v in enumerate(['因子','LAB 實測','LINE 實測','Shift','計算公式']):_tb.rows[0].cells[j].text=v
+                for _,rr in _case_audit['source'].iterrows():
+                    cc=_tb.add_row().cells
+                    for j,v in enumerate([rr['色差因子'],f'{rr["來源 LAB 實測值"]:.6f}',f'{rr["來源 LINE 實測值"]:.6f}',f'{rr["Shift = LINE − LAB"]:.6f}',rr['計算公式']]):cc[j].text=str(v)
+                doc.add_heading('表2｜候選 LAB 最不利點與 LINE 預測計算',level=2)
+                doc.add_paragraph('LINE 預測_j = 候選 LAB 最不利點_j + 來源 Shift_j；LINE ΔE* = SQRT(SUM(LINE 預測_j²))。')
+                _tb=doc.add_table(rows=1,cols=5);_tb.style='Table Grid'
+                for j,v in enumerate(['因子','LAB 界限點','Shift','LINE 預測','LINE 平方']):_tb.rows[0].cells[j].text=v
+                for _,rr in _case_audit['prediction'].iterrows():
+                    cc=_tb.add_row().cells
+                    for j,v in enumerate([rr['色差因子'],f'{rr["候選 LAB 最不利點 (A)"]:.6f}',f'{rr["來源 Shift (B)"]:.6f}',f'{rr["LINE 預測值 (A+B)"]:.6f}',f'{rr["預測 LINE 平方"]:.8f}']):cc[j].text=str(v)
+                doc.add_heading('表3｜LINE ΔE* 與規格餘裕計算驗證',level=2)
+                _tb=doc.add_table(rows=1,cols=3);_tb.style='Table Grid'
+                for j,v in enumerate(['檢驗項目','資料來源／公式','計算結果']):_tb.rows[0].cells[j].text=v
+                for _,rr in _case_audit['verification'].iterrows():
+                    cc=_tb.add_row().cells
+                    val=rr['計算結果']
+                    for j,v in enumerate([rr['驗證項目'],rr['計算公式 / 資料來源'],f'{val:.8f}' if isinstance(val,(float,np.floating)) else str(val)]):cc[j].text=str(v)
+                doc.add_paragraph('計算及判定使用未四捨五入之數值；顯示為方便閱讀而取小數。'
+                                  '來源 Shift 三因子均來自同一批次。每個來源 Shift 配合八個 LAB 界限角落檢查，'
+                                  '選擇全部來源中 LINE ΔE* 最高之情境；完整角落數據請參閱 Excel。')
             doc.add_paragraph('LINE 最不利情境 = MAX_s SQRT(SUM_j(MAX(|LCL_j+s_j|,|UCL_j+s_j|)^2))。LINE 規格餘裕 = LINE 規格 − LINE 最不利情境。')
             doc.add_paragraph('歷史情境壓力測試不等於未來 NG 機率，也未涵蓋未觀測的 Shift 波動及量測不確定性；尤其規格餘裕接近 0 時，不宜宣稱保證安全。')
 
