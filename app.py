@@ -2130,65 +2130,68 @@ elif app_mode == "🎛️ Control Limit Calculator":
             })
 
         incoming_summary = pd.DataFrame(summary_rows)
-        st.dataframe(incoming_summary.style.format(precision=2), hide_index=True, use_container_width=True)
-        st.caption(
-            "Recommended LAB limits are the intersection of Mean ± Kσ and IQR limits calculated from "
-            "incoming LAB values associated with acceptable LINE outputs whenever current LINE limits are available."
-        )
-
-        # User-confirmed starting LAB bounds. Statistics above remain read-only.
-        # Values are stored separately for every color, so changing colors does
-        # not carry over another paint code's manual decisions.
+        # The TWO Recommended LAB columns in THIS summary are editable.
+        # All statistics remain read-only reference values.
         _manual_key = f"task3_manual_start_limits_{str(color)}"
-        _suggested_bounds = pd.DataFrame({
-            "因子": ["ΔL*", "Δa*", "Δb*"],
-            "確認 LCL": [round(float(calc_res[f]["rec_lcl"]), 2)
-                       if calc_res[f]["rec_lcl"] is not None else float("nan") for f in factors],
-            "確認 UCL": [round(float(calc_res[f]["rec_ucl"]), 2)
-                       if calc_res[f]["rec_ucl"] is not None else float("nan") for f in factors],
-        })
-        # Fall back to IQR if Standard and IQR do not overlap.
-        for _i, _f in enumerate(factors):
-            if not np.isfinite(_suggested_bounds.loc[_i, "確認 LCL"]):
-                _suggested_bounds.loc[_i, "確認 LCL"] = round(float(calc_res[_f]["iqr_lcl"]), 2)
-            if not np.isfinite(_suggested_bounds.loc[_i, "確認 UCL"]):
-                _suggested_bounds.loc[_i, "確認 UCL"] = round(float(calc_res[_f]["iqr_ucl"]), 2)
+        _reset_key = f"task3_manual_editor_version_{str(color)}"
+        _recommended_columns = ["Recommended LAB LCL", "Recommended LAB UCL"]
+        _defaults = incoming_summary[_recommended_columns].copy()
+        for _idx, _factor in enumerate(factors):
+            for _kind, _col in (("lcl", _recommended_columns[0]), ("ucl", _recommended_columns[1])):
+                if pd.isna(_defaults.at[_idx, _col]):
+                    _defaults.at[_idx, _col] = round(float(calc_res[_factor][f"iqr_{_kind}"]), 2)
         if _manual_key not in st.session_state:
-            st.session_state[_manual_key] = _suggested_bounds.copy()
-        st.markdown("### ✍️ 人工確認 LAB 初始管制界限（後續分析依此計算）")
-        st.caption("上方 IQR / Standard 統計結果不變。可依標準法、IQR、交集或現場使用方便的二位小數調整下表；"
-                   "下方 Shift 風險比較及 Word / Excel 將以**人工確認界限**為基準。")
-        _editor_version_key = f"task3_manual_editor_version_{str(color)}"
-        if _editor_version_key not in st.session_state:
-            st.session_state[_editor_version_key] = 0
-        if st.button("↩ 恢復統計建議值", key=f"task3_reset_manual_{str(color)}"):
-            st.session_state[_manual_key] = _suggested_bounds.copy()
-            st.session_state[_editor_version_key] += 1
+            st.session_state[_manual_key] = _defaults.copy()
+        if _reset_key not in st.session_state:
+            st.session_state[_reset_key] = 0
+
+        st.info("✍️ **請直接點選下表最右側的 Recommended LAB LCL / UCL 數字進行修改。**"
+                "可填入 IQR、Standard、交集或人工調整值；其餘統計欄位僅供參考。"
+                "後續 LINE 風險、Word / Excel 均使用修改後數值。")
+        if st.button("↩ 恢復自動建議值", key=f"task3_reset_manual_{color}"):
+            st.session_state[_manual_key] = _defaults.copy()
+            st.session_state[_reset_key] += 1
             st.rerun()
-        _editable_bounds = st.data_editor(
-            st.session_state[_manual_key],
+
+        _editor_source = incoming_summary.copy()
+        _stored = st.session_state[_manual_key]
+        for _col in _recommended_columns:
+            _editor_source[_col] = pd.to_numeric(_stored[_col], errors="coerce").to_numpy(float)
+        _read_only_columns = [c for c in _editor_source.columns if c not in _recommended_columns]
+        _edited = st.data_editor(
+            _editor_source,
             column_config={
-                "因子": st.column_config.TextColumn("因子", disabled=True),
-                "確認 LCL": st.column_config.NumberColumn("確認 LCL", format="%.2f", step=0.01, required=True),
-                "確認 UCL": st.column_config.NumberColumn("確認 UCL", format="%.2f", step=0.01, required=True),
+                "Recommended LAB LCL": st.column_config.NumberColumn(
+                    "✏️ Recommended LAB LCL", format="%.2f", step=0.01, required=True),
+                "Recommended LAB UCL": st.column_config.NumberColumn(
+                    "✏️ Recommended LAB UCL", format="%.2f", step=0.01, required=True),
             },
-            disabled=["因子"], hide_index=True, use_container_width=True,
-            num_rows="fixed", key=f"task3_manual_editor_{str(color)}_{st.session_state[_editor_version_key]}"
+            disabled=_read_only_columns,
+            hide_index=True,
+            num_rows="fixed",
+            use_container_width=True,
+            key=f"task3_direct_limits_editor_{color}_{st.session_state[_reset_key]}",
         )
-        st.session_state[_manual_key] = _editable_bounds.copy()
-        _start_lcl = pd.to_numeric(_editable_bounds["確認 LCL"], errors="coerce").to_numpy(float)
-        _start_ucl = pd.to_numeric(_editable_bounds["確認 UCL"], errors="coerce").to_numpy(float)
-        _manual_valid = (len(_start_lcl) == 3 and len(_start_ucl) == 3
-                         and np.isfinite(_start_lcl).all() and np.isfinite(_start_ucl).all()
-                         and np.all(_start_lcl < _start_ucl))
+        st.session_state[_manual_key] = _edited[_recommended_columns].copy()
+        _start_lcl = pd.to_numeric(_edited[_recommended_columns[0]], errors="coerce").to_numpy(float)
+        _start_ucl = pd.to_numeric(_edited[_recommended_columns[1]], errors="coerce").to_numpy(float)
+        _manual_valid = (
+            len(_start_lcl) == 3 and len(_start_ucl) == 3
+            and np.isfinite(_start_lcl).all() and np.isfinite(_start_ucl).all()
+            and np.all(_start_lcl < _start_ucl)
+        )
         if not _manual_valid:
-            st.error("人工確認界限無效：各因子必須為數值，且 LCL 必須小於 UCL。請先修正後再分析。")
+            st.error("輸入無效：所有 LCL / UCL 必須為數值，且每個因子的 LCL 必須小於 UCL。")
             st.stop()
-        _manual_peak = float(np.linalg.norm(np.maximum(np.abs(_start_lcl),np.abs(_start_ucl))))
+        _manual_peak = float(np.linalg.norm(np.maximum(np.abs(_start_lcl), np.abs(_start_ucl))))
         st.caption(f"人工確認界限最不利 LAB ΔE* = {_manual_peak:.2f}；本色號規格 ≤ {lab_de_target:.2f}。"
-                       "超過規格仍可進行風險評估，但不代表已通過 LAB 驗證。")
-        _selected_limits_df = pd.DataFrame({"因子":["ΔL*","Δa*","Δb*"],
-                                            "人工確認 LCL":_start_lcl,"人工確認 UCL":_start_ucl})
+                   "超出規格仍可評估 LINE 風險，但不得視為符合 LAB 規格。")
+        _selected_limits_df = pd.DataFrame({
+            "因子": ["ΔL*", "Δa*", "Δb*"],
+            "人工確認 LCL": _start_lcl,
+            "人工確認 UCL": _start_ucl,
+        })
+        st.caption("原始 IQR / Standard 計算保持不變；本表之✏️欄位為後續計算的人工確認基準。")
 
         dE_std = math.sqrt(dE_std_sq)
         dE_iqr = math.sqrt(dE_iqr_sq)
@@ -2200,18 +2203,16 @@ elif app_mode == "🎛️ Control Limit Calculator":
         c1, c2, c3 = st.columns(3)
         c1.metric("Standard-derived ΔE*", f"{dE_std:.2f}")
         c2.metric("IQR-derived ΔE*", f"{dE_iqr:.2f}")
-        c3.metric("Recommended ΔE*", f"{dE_rec:.2f}" if dE_rec is not None else "N/A")
+        c3.metric("Confirmed LAB ΔE*", f"{_manual_peak:.2f}")
 
-        if dE_rec is None:
-            st.warning("At least one factor has no overlap between Standard and IQR; review that factor before setting the incoming LAB limit.")
-        elif dE_rec <= lab_de_target:
+        if _manual_peak <= lab_de_target:
             st.success(
-                f"✅ Recommended incoming LAB component limits produce a derived ΔE* boundary of {dE_rec:.2f}, "
+                f"✅ Manually confirmed incoming LAB limits produce a derived ΔE* boundary of {_manual_peak:.2f}, "
                 f"within the current LAB target ≤ {lab_de_target}."
             )
         else:
             st.warning(
-                f"⚠ Recommended incoming LAB component limits produce a derived ΔE* boundary of {dE_rec:.2f}, "
+                f"⚠ Manually confirmed incoming LAB limits produce a derived ΔE* boundary of {_manual_peak:.2f}, "
                 f"above the current LAB target {lab_de_target}. Further tightening should be reviewed."
             )
 
