@@ -2156,298 +2156,208 @@ elif app_mode == "🎛️ Control Limit Calculator":
             f"LINE ΔE* ≤ {line_de_target:.2f} using the step-by-step validation below."
         )
 
-    # ---------------------------------------------------------
-    # TASK 3: FIVE-STEP INCOMING LAB LIMIT VALIDATION
-    # Keep the existing IQR calculation and all other views unchanged.
-    # ---------------------------------------------------------
-    st.markdown('---')
-    st.markdown('## LAB 入料管制界限評估與改善')
-    st.caption('分析順序：IQR 適用性 → LAB–LINE Shift → 以 LINE 風險最佳化 LAB 界限 → LINE 風險驗證 → 管制建議。歷史保留批數僅供參考，不作為最佳化目標。')
-    _flow = None; _check = None; _limits = None; _summary = None; _risk = None; _conclusion = None
-    _case_audit = None; _shift_stats = None; _stress_initial = None; _stress_proposed = None; _worst_initial_case = None; _worst_proposed_case = None; _proposed_margin = np.nan; _paired = None; _valid_paired = None
+    # =========================================================
+    # TASK 3: THREE REPORT-READY RESULTS + ONE AUDIT EXPANDER
+    # Production target: LINE ΔE* <= color-specific specification.
+    # Historical-shift scenarios are a stress test, NOT a guarantee.
+    # Existing IQR and Standard Method computations above remain intact.
+    # =========================================================
+    st.markdown("---")
+    st.markdown("## 5. LAB–LINE 產出風險驗證與管制界限最佳化")
+    st.caption(f"色號：{color}　｜　LAB ΔE* 規格 ≤ {lab_de_target:.2f}　｜　LINE ΔE* 規格 ≤ {line_de_target:.2f}")
     _factors = ('ΔL', 'Δa', 'Δb')
-    _valid_iqr = all(f in calc_res and np.isfinite(calc_res[f].get('iqr_lcl', np.nan))
-                     and np.isfinite(calc_res[f].get('iqr_ucl', np.nan))
-                     and calc_res[f]['iqr_lcl'] < calc_res[f]['iqr_ucl'] for f in _factors)
+    _names = ['ΔL*', 'Δa*', 'Δb*']
+    _lab_keys = [f'LAB_{f}' for f in _factors]
+    _shift_keys = [f'Shift_{f}' for f in _factors]
+    _limits = pd.DataFrame()
+    _risk = pd.DataFrame()
+    _risk_overview = None
+    _comparison = None
+    _flow = pd.DataFrame()
+    _check = pd.DataFrame()
+    _summary = pd.DataFrame()
+    _shift_stats = pd.DataFrame()
+    _case_audit = None
+    _stress_initial = pd.DataFrame()
+    _stress_proposed = pd.DataFrame()
+    _worst_initial_case = None
+    _worst_proposed_case = None
+    _paired = pd.DataFrame()
+    _valid_paired = pd.DataFrame()
+    _conclusion = None
+    _b_lo = _b_hi = None
+    _line_worst = float('nan')
+    _new_worst = float('nan')
+    _proposed_margin = float('nan')
+    _lo = _hi = None
+    _valid_iqr = all(
+        f in calc_res and np.isfinite(calc_res[f].get('iqr_lcl', np.nan))
+        and np.isfinite(calc_res[f].get('iqr_ucl', np.nan))
+        and calc_res[f]['iqr_lcl'] < calc_res[f]['iqr_ucl']
+        for f in _factors
+    )
     if not _valid_iqr:
-        st.warning('請先完成 ΔL*、Δa*、Δb* 三項 IQR 管制界限計算。')
+        st.warning('請先完成三個色差因子的 IQR 管制界限計算。')
     else:
-        _lo = np.array([calc_res[f]['iqr_lcl'] for f in _factors], dtype=float)
-        _hi = np.array([calc_res[f]['iqr_ucl'] for f in _factors], dtype=float)
-        _m = np.maximum(np.abs(_lo), np.abs(_hi))
-        _worst = float(np.linalg.norm(_m))
+        _lo = np.array([calc_res[f]['iqr_lcl'] for f in _factors], float)
+        _hi = np.array([calc_res[f]['iqr_ucl'] for f in _factors], float)
         _tol = 1e-10
-        _names = ['ΔL*', 'Δa*', 'Δb*']
-
-        # LAB population: aggregate incoming LAB directly from production rows.
-        # This DOES NOT require a corresponding LINE reading. Previously, deriving
-        # LAB counts from spc_data could drop LAB-only batches due to pairing.
+        # LAB acceptance is independent of LINE availability and IQR inclusion.
         _input_columns = ['入料檢測 ΔL 正面', '入料檢測 Δa 正面', '入料檢測 Δb 正面']
         _labs = df.groupby('製造批號', as_index=False)[_input_columns].mean()
-        _labs = _labs.rename(columns=dict(zip(_input_columns, [f'LAB_{f}' for f in _factors])))
-        _lab_keys = [f'LAB_{f}' for f in _factors]
-        _all_lab_batches = len(_labs)
+        _labs = _labs.rename(columns=dict(zip(_input_columns, _lab_keys)))
         _labs[_lab_keys] = _labs[_lab_keys].apply(pd.to_numeric, errors='coerce')
         _labs = _labs.replace([np.inf, -np.inf], np.nan).dropna(subset=_lab_keys).copy()
-        _lab_arr = _labs[_lab_keys].to_numpy(float)
-        _total = len(_labs)
-        if _total == 0:
-            st.warning('所選期間沒有三因子完整的 LAB 批次，無法進行後續驗證。')
+        if _labs.empty:
+            st.warning('此色號無三因子完整 LAB 批次，無法評估。')
         else:
-            _labs['LAB ΔE*'] = np.linalg.norm(_lab_arr, axis=1)
-            _overall_lab_pass = int((_labs['LAB ΔE*'] <= lab_de_target + _tol).sum())
-            st.markdown('#### 歷史進料品質與 IQR 篩選為不同判定')
-            st.caption(f'依原始批次 LAB ΔE* ≤ {lab_de_target:.2f} 判定：{_overall_lab_pass}/{_total} 批合格（{100*_overall_lab_pass/_total:.2f}%）。此為進料規格符合率，不等於三因子 IQR 保留率。')
-            _factor_ok = (_lab_arr >= _lo - _tol) & (_lab_arr <= _hi + _tol)
-            for _j, _f in enumerate(_names):
-                _labs[f'{_f} IQR 判定'] = np.where(_factor_ok[:, _j], 'OK', 'NG')
-            _labs['三因子 IQR 判定'] = np.where(np.all(_factor_ok, axis=1), 'OK', 'NG')
-            _labs['LAB ΔE* 判定'] = np.where(_labs['LAB ΔE*'] <= lab_de_target + _tol, 'OK', 'NG')
-            _labs['原始 IQR + ΔE* 合格'] = np.all(_factor_ok, axis=1) & (_labs['LAB ΔE*'] <= lab_de_target + _tol)
-            _labs['未符合原因'] = [
-                '；'.join([_names[j] + ' 超出 IQR' for j in range(3) if not _factor_ok[i,j]]
-                         + ([f'LAB ΔE* > {lab_de_target:.2f}'] if _lab_arr[i] @ _lab_arr[i] > lab_de_target ** 2 + 1e-10 else [])) or '符合'
-                for i in range(_total)
-            ]
+            _labs['LAB ΔE*'] = np.linalg.norm(_labs[_lab_keys].to_numpy(float), axis=1)
+            _labs['LAB 規格合格'] = _labs['LAB ΔE*'] <= lab_de_target + _tol
+            _arr = _labs[_lab_keys].to_numpy(float)
+            _labs['三因子 IQR 合格'] = np.all((_arr >= _lo - _tol) & (_arr <= _hi + _tol), axis=1)
+            _labs['原始 IQR + ΔE* 合格'] = _labs['三因子 IQR 合格'] & _labs['LAB 規格合格']
 
-            st.markdown('### 步驟一｜原始 IQR 管制界限適用性驗證')
-            _check = pd.DataFrame({'因子':_names, 'IQR LCL':_lo, 'IQR UCL':_hi,
-                'Mj = MAX(|LCL|, |UCL|)':_m, 'Mj²':_m**2})
-            st.dataframe(_check.style.format(precision=2), use_container_width=True, hide_index=True)
-            st.latex(r'M_j=\max(|LCL_j|,|UCL_j|),\quad LAB\ \Delta E^*_{max}=\sqrt{M_L^2+M_a^2+M_b^2}')
-            st.caption('代入：√(' + ' + '.join(f'{v:.2f}²' for v in _m) + f') = {_worst:.2f}；LAB 規格 ≤ {lab_de_target:.2f}。')
-            if _worst > lab_de_target + _tol:
-                st.warning(f'原始 IQR 界限最不利組合的 LAB ΔE* = {_worst:.2f} > {lab_de_target:.2f}；單靠三因子 IQR 界限不足以保證所有組合合格。')
-            else:
-                st.success(f'原始 IQR 界限最不利組合 LAB ΔE* = {_worst:.2f} ≤ {lab_de_target:.2f}。')
-            _flow = pd.DataFrame([
-                {'檢查階段':'三因子完整 LAB 批次', '符合批數':_total, '計算方式':'三因子 LAB 均非空值'},
-                {'檢查階段':f'現行 LAB ΔE* ≤ {lab_de_target:.2f}（未套用 IQR）', '符合批數':_overall_lab_pass, '計算方式':f'SQRT(L²+a²+b²) ≤ {lab_de_target:.2f}'},
-                {'檢查階段':'僅 ΔL* 落在 IQR', '符合批數':int(_factor_ok[:,0].sum()),'計算方式':'LCL_L ≤ ΔL* ≤ UCL_L'},
-                {'檢查階段':'三因子同時落在 IQR', '符合批數':int(np.all(_factor_ok,axis=1).sum()),'計算方式':'ΔL*、Δa*、Δb* 均在 IQR'},
-                {'檢查階段':f'三因子 IQR + LAB ΔE* ≤ {lab_de_target:.2f}', '符合批數':int(_labs['原始 IQR + ΔE* 合格'].sum()),'計算方式':f'前項 AND SQRT(L²+a²+b²) ≤ {lab_de_target:.2f}'},
-            ])
-            _flow['比例 (%)'] = 100*_flow['符合批數']/_total
-            st.dataframe(_flow.style.format({'比例 (%)':'{:.2f}'}), use_container_width=True, hide_index=True)
-            st.caption(f'分母 = {_total} 批完整 LAB；另有 {_all_lab_batches-_total} 批缺少 LAB 三因子數值，不納入比率。上表各階段依序顯示，避免將單一 ΔL* 圖表當成三因子合格率。')
-
-            st.markdown('### 步驟二｜建立 LAB–LINE Shift 歷史關係')
-            _line_columns = [f'LINE_{f}' for f in _factors]
-            _line_parts=[]
-            for _fac in _factors:
-                _ns=df[[f'正-北 {_fac}',f'正-南 {_fac}']].mean(axis=1)
-                _one=pd.DataFrame({'製造批號':df['製造批號'],'line_v':_ns}).groupby('製造批號')['line_v'].mean().rename(f'LINE_{_fac}')
-                _line_parts.append(_one)
-            _line_batch=pd.concat(_line_parts,axis=1).reset_index()
-            _paired=_labs.merge(_line_batch,on='製造批號',how='inner',validate='one_to_one')
-            _paired=_paired.replace([np.inf,-np.inf],np.nan).dropna(subset=_line_columns).copy()
-            _plab_arr=_paired[_lab_keys].to_numpy(float)
-            _line_arr=_paired[_line_columns].to_numpy(float)
-            _paired['LINE ΔE*']=np.linalg.norm(_line_arr,axis=1)
-            _paired['LINE NG']=_paired['LINE ΔE*']>line_de_target+_tol
-            for _j,_f in enumerate(_factors):
-                _paired[f'Shift_{_f}']=_line_arr[:,_j]-_plab_arr[:,_j]
-            _paired['現行 LAB ΔE* 合格']=_paired['LAB ΔE*']<=lab_de_target+_tol
-            _valid_paired=_paired.loc[_paired['現行 LAB ΔE* 合格']].copy()
-            _shift_matrix=_valid_paired[[f'Shift_{f}' for f in _factors]].to_numpy(float)
-            st.caption('Shift_j = LINE_j − LAB_j，同一製造批號三因子成組使用；Shift 來源為符合現行 LAB ΔE* 規格的完整配對批次，LINE NG 不排除。不預先用 IQR 排除 LAB 合格批。')
-            st.dataframe(pd.DataFrame([{'完整 LAB–LINE 配對批數':len(_paired),
-                'LAB 規格合格且完整配對':len(_valid_paired),
-                '歷史 LINE NG 批數（LAB 合格）':int(_valid_paired['LINE NG'].sum())}]),
-                hide_index=True,use_container_width=True)
-            with st.expander('查看逐批 LAB–LINE 與 Shift 資料',expanded=False):
-                st.dataframe(_paired.style.format(precision=2),use_container_width=True,hide_index=True)
-
-            # The spread of SHIFT is a descriptive diagnostic, not itself a
-            # prediction interval. Do not mix component maxima across batches.
+            # Paired batch averages: NORTH/SOUTH per row, then batch mean.
+            _line_parts = []
+            for _f in _factors:
+                _row_line = df[[f'正-北 {_f}', f'正-南 {_f}']].mean(axis=1)
+                _agg = pd.DataFrame({'製造批號':df['製造批號'], 'v':_row_line}).groupby('製造批號')['v'].mean().rename(f'LINE_{_f}')
+                _line_parts.append(_agg)
+            _line_batch = pd.concat(_line_parts, axis=1).reset_index()
+            _paired = _labs.merge(_line_batch, on='製造批號', how='inner', validate='one_to_one')
+            _line_keys = [f'LINE_{f}' for f in _factors]
+            _paired = _paired.replace([np.inf, -np.inf], np.nan).dropna(subset=_line_keys).copy()
+            _paired['LINE ΔE*'] = np.linalg.norm(_paired[_line_keys].to_numpy(float), axis=1)
+            _paired['LINE NG'] = _paired['LINE ΔE*'] > line_de_target + _tol
+            for _f in _factors:
+                _paired[f'Shift_{_f}'] = _paired[f'LINE_{_f}'] - _paired[f'LAB_{_f}']
+            # In-spec LAB and complete paired readings, regardless of LINE pass/fail.
+            _valid_paired = _paired.loc[_paired['LAB 規格合格']].copy()
             _shift_stats = task3_shift_summary(_valid_paired)
-            st.markdown('#### 歷史 Shift 平均、極值及變動幅度')
-            st.dataframe(_shift_stats.style.format(precision=2), use_container_width=True, hide_index=True)
-            st.latex(r'Shift_{i,j}=LINE_{i,j}-LAB_{i,j},\quad Range_j=\max_i Shift_{i,j}-\min_i Shift_{i,j}')
-            st.latex(r'SD_j=\sqrt{\frac{\sum_{i=1}^{n}(Shift_{i,j}-\overline{Shift_j})^2}{n-1}}')
-            st.caption('Max / Min / Range / SD 描述已觀察到的波動幅度；此表不能當成未來 Shift 的信賴界限。三因子之 LINE 情境仍逐批使用同一個 Shift 向量。')
+            _shift_matrix = _valid_paired[_shift_keys].to_numpy(float)
 
-            st.markdown('### 步驟三｜以 LINE 風險為目標最佳化 LAB 管制界限')
-            _opt=task3_line_risk_box(_valid_paired[_lab_keys].to_numpy(float),_shift_matrix,
-                                     lab_de_target,line_de_target)
-            _limits=pd.DataFrame()
-            _new_worst=np.nan
-            _b_lo=None; _b_hi=None
-            _line_worst=np.nan
+            # RESULT 1 — current IQR risk under the observed joint Shift vectors.
+            st.markdown('### 5.1 原始 IQR 界限之 LINE 風險評估')
+            _stress_initial, _worst_initial_case = task3_stress_audit(
+                _lo, _hi, _valid_paired, line_de_target)
+            _current_peak = (float(_worst_initial_case['最不利 LINE ΔE*'])
+                             if _worst_initial_case is not None else float('nan'))
+            _current_margin = line_de_target - _current_peak
+            _risk_overview = pd.DataFrame([
+                {'評估項目':'LAB ΔE* 規格','結果':lab_de_target},
+                {'評估項目':'LINE ΔE* 規格','結果':line_de_target},
+                {'評估項目':'原始 IQR 最不利 LINE ΔE*（歷史 Shift）','結果':_current_peak},
+                {'評估項目':'LINE 規格餘裕 = 規格 − 最不利值','結果':_current_margin},
+            ])
+            st.dataframe(_risk_overview.style.format({'結果':'{:.2f}'}, na_rep='—'),
+                         use_container_width=True, hide_index=True)
+            if np.isfinite(_current_peak):
+                if _current_peak > line_de_target + _tol:
+                    st.warning(f'原始 IQR 在已觀察 Shift 最不利情境下預測 LINE ΔE* = {_current_peak:.2f}，存在超規情境。')
+                else:
+                    st.info(f'原始 IQR 在已觀察 Shift 情境下預測 LINE ΔE* 最大為 {_current_peak:.2f}；非未來品質保證。')
+            else:
+                st.warning('沒有符合 LAB 規格且配對完整的 Shift，無法判定原始 IQR 的 LINE 情境風險。')
+
+            # RESULT 2 — LINE-risk-constrained candidate; batch counts are NOT the objective.
+            st.markdown('### 5.2 LAB 三因子管制界限最佳化建議')
+            _opt = task3_line_risk_box(_valid_paired[_lab_keys].to_numpy(float),
+                                       _shift_matrix, lab_de_target, line_de_target)
             if 'error' in _opt:
                 st.warning(_opt['error'])
-                st.caption('未產生可確認的建議 LCL/UCL；不得將不存在的建議界限當作已驗證安全。')
-                _labs['改善後界限合格']=False
+                st.caption('未產生候選界限；不可用空白值代替已驗證的數字。')
             else:
-                _b_lo=_opt['lo'];_b_hi=_opt['hi']
-                _new_worst=_opt['lab_worst'];_line_worst=_opt['line_worst']
-                _limits=pd.DataFrame({'因子':_names,'原始 IQR LCL':_lo,'原始 IQR UCL':_hi,
-                     '改善後 LCL':_b_lo,'改善後 UCL':_b_hi,
-                     '實際 LAB 合格資料下限':_opt['observed_lo'],
-                     '實際 LAB 合格資料上限':_opt['observed_hi']})
-                _labs['改善後界限合格']=np.all((_lab_arr>=_b_lo-_tol)&(_lab_arr<=_b_hi+_tol),axis=1)
-                st.dataframe(_limits.style.format(precision=2),use_container_width=True,hide_index=True)
-                st.latex(r'\max\;\prod_{j=L,a,b}(UCL_j-LCL_j)')
-                st.latex(r'\sqrt{\sum_j\max(|LCL_j|,|UCL_j|)^2}\leq LAB\;\Delta E^*_{spec}')
-                st.latex(r'\max_{s\in\mathcal{S}}\sqrt{\sum_j\max(|LCL_j+s_j|,|UCL_j+s_j|)^2}\leq LINE\;\Delta E^*_{spec}')
-                st.caption('S 為現行 LAB 合格配對批次的三維歷史 Shift 集合。新界限限於合格 LAB 各因子的歷史觀察最小/最大值，但不受舊 IQR 限制。')
-                st.write(f'候選界限最不利 LAB ΔE* = **{_new_worst:.2f}**（上限 {lab_de_target:.2f}）；'
-                         f'套用全部 {_opt["historical_shift_n"]} 組歷史 Shift 的 LINE 最不利 ΔE* = **{_line_worst:.2f}**（上限 {line_de_target:.2f}）。')
-                st.caption('這是歷史 Shift 的最壞情境壓力測試，不是未來 LINE 永不超規的統計保證。僅 8 批等少量樣本時應列為待驗證建議。')
-
-            # Exact stress audit identifies the historical shift batch, LAB
-            # corner and LINE vector that produce the most adverse scenario.
-            _stress_initial, _worst_initial_case = task3_stress_audit(_lo, _hi, _valid_paired, line_de_target)
-            if _b_lo is not None:
-                _stress_proposed, _worst_proposed_case = task3_stress_audit(_b_lo, _b_hi, _valid_paired, line_de_target)
+                _b_lo = np.asarray(_opt['lo'], float)
+                _b_hi = np.asarray(_opt['hi'], float)
+                _new_worst = float(_opt['lab_worst'])
+                _line_worst = float(_opt['line_worst'])
+                _limits = pd.DataFrame({
+                    '色差因子':_names,
+                    '原始 IQR LCL':_lo, '原始 IQR UCL':_hi,
+                    '建議 LAB LCL':_b_lo, '建議 LAB UCL':_b_hi,
+                })
+                st.dataframe(_limits.style.format(precision=2), use_container_width=True, hide_index=True)
+                st.caption('方法：於歷史合格 LAB 各因子觀測範圍內，最大化三因子界限寬度乘積；同時限制所有 LAB 界限角落符合 LAB ΔE* 規格，且逐一套用同批三維 Shift 後 LINE ΔE* 不超規。此為數值候選解。')
+                _stress_proposed, _worst_proposed_case = task3_stress_audit(
+                    _b_lo, _b_hi, _valid_paired, line_de_target)
                 if _worst_proposed_case is not None:
                     _line_worst = float(_worst_proposed_case['最不利 LINE ΔE*'])
-                    _proposed_margin = float(_worst_proposed_case['LINE 規格餘裕'])
-            st.markdown('### 步驟四｜LINE 品質風險驗證與改善前後比較')
-            st.info('請先核對下方三張逐項計算表：實測 LAB / LINE → Shift → 候選 LAB 邊界 → 預測 LINE ΔE* → 規格餘裕。後續摘要僅作比較。')
-            # Traceability: three readable formula tables, calculated from original
-            # measured data of the worst-shift source batch, NOT fabricated values.
-            if _worst_proposed_case is not None and _b_lo is not None:
-                _case_audit = task3_worst_case_calculation_tables(
-                    _worst_proposed_case, _valid_paired, line_de_target, _b_lo, _b_hi)
-                if _case_audit is not None:
-                    st.markdown('#### 表1｜最不利 Shift 來源批次：實測值與計算')
-                    st.caption(f'資料來源：製造批號 {_case_audit["batch"]}。來源 LAB / LINE 取同一批之三因子實測平均；Shift = LINE − LAB。')
-                    st.dataframe(_case_audit['source'].style.format(precision=2),
-                        use_container_width=True, hide_index=True)
-                    st.markdown('#### 表2｜候選 LAB 界限點與預測 LINE 計算')
-                    st.caption('每一因子：LINE 預測值 = 候選 LAB 最不利點 + 該批歷史 Shift；平方後再加總開根號。')
-                    st.dataframe(_case_audit['prediction'].style.format(precision=2),
-                        use_container_width=True, hide_index=True)
-                    st.markdown('#### 表3｜LINE ΔE* 計算與規格驗證')
-                    st.dataframe(_case_audit['verification'].style.format(
-                        {'計算結果': lambda x: f'{x:.2f}' if isinstance(x, (float, np.floating)) and np.isfinite(x) else str(x)},
-                        na_rep='—'),use_container_width=True,hide_index=True)
-                    st.caption('所有判定使用未四捨五入的原始數字；畫面數字只為顯示而四捨五入。'
-                        '此結果僅檢驗已觀察的 Shift 情境，非未來製程安全保證。')
-                    with st.expander('檢查 8 個 LAB 界限角落（來源批次 Shift）',expanded=False):
-                        st.dataframe(_case_audit['corners'].style.format(precision=2),
-                            use_container_width=True,hide_index=True)
-                        st.caption('最不利來源批次係由所有合格 LAB 完整配對批次的 Shift，各自配合 8 個角落求出最大 LINE ΔE* 後選出。')
-                else:
-                    st.warning('無法取得最不利 Shift 來源批次的完整實測 LAB / LINE 數據，暫不顯示推算表。')
+                    _proposed_margin = line_de_target - _line_worst
+                    _case_audit = task3_worst_case_calculation_tables(
+                        _worst_proposed_case, _valid_paired, line_de_target, _b_lo, _b_hi)
 
-            _groups=[('現行 LAB ΔE* 規格（不加 IQR）',_valid_paired),
-                     ('原始 IQR + LAB ΔE*',_valid_paired.loc[_valid_paired['原始 IQR + ΔE* 合格']])]
-            if _b_lo is not None:
-                _is_new=np.all((_valid_paired[_lab_keys].to_numpy(float)>=_b_lo-_tol)&
-                               (_valid_paired[_lab_keys].to_numpy(float)<=_b_hi+_tol),axis=1)
-                _groups.append(('LINE 風險導向候選 LAB 界限',_valid_paired.loc[_is_new]))
-            _risk_rows=[]
-            for _gname,_subset in _groups:
-                _n=len(_subset);_ng=int(_subset['LINE NG'].sum())
-                _risk_rows.append({'管制方式':_gname,'LAB 合格且 LINE 完整配對批數':_n,
-                    'LINE NG 批數':_ng,'歷史 LINE NG (%)':100*_ng/_n if _n else np.nan,
-                    '歷史 LINE ΔE* 最大值':float(_subset['LINE ΔE*'].max()) if _n else np.nan,
-                    'LINE 情境最不利 ΔE*':_line_worst if '候選' in _gname else np.nan,
-                    '模擬 LINE NG (%)':np.nan})
-            _risk=pd.DataFrame(_risk_rows)
-            if _worst_initial_case is not None:
-                _risk.loc[_risk['管制方式'].str.contains('原始 IQR', na=False), 'LINE 情境最不利 ΔE*'] = float(_worst_initial_case['最不利 LINE ΔE*'])
-            st.dataframe(_risk.style.format({'歷史 LINE NG (%)':'{:.2f}',
-                '歷史 LINE ΔE* 最大值':'{:.2f}','LINE 情境最不利 ΔE*':'{:.2f}'},na_rep='—'),
-                use_container_width=True,hide_index=True)
-            # Show both the old and proposed boundary stress results rather
-            # than leaving an unexplained NA in the comparison table.
-            if _worst_initial_case is not None:
-                _initial_line_peak = float(_worst_initial_case['最不利 LINE ΔE*'])
-                _risk.loc[_risk['管制方式'].str.contains('原始 IQR', na=False), 'LINE 情境最不利 ΔE*'] = _initial_line_peak
-            st.markdown('#### 最不利情境與 LINE 規格餘裕')
-            _stress_compare_rows = []
-            for _scenario, _case in [('原始 IQR 界限', _worst_initial_case), ('LINE 風險導向候選界限', _worst_proposed_case)]:
-                if _case is not None:
-                    _stress_compare_rows.append({'管制界限':_scenario,
-                        '最不利 Shift 來源批號':_case['Shift 來源批號'],
-                        '預測 LINE ΔE* 最大值':_case['最不利 LINE ΔE*'],
-                        '規格上限':line_de_target,
-                        '規格餘裕 = 上限 - 最大值':_case['LINE 規格餘裕'],
-                        '歷史情境判定':_case['判定']})
-            _stress_comparison = pd.DataFrame(_stress_compare_rows)
-            if not _stress_comparison.empty:
-                st.dataframe(_stress_comparison.style.format(precision=2), use_container_width=True, hide_index=True)
-            st.latex(r'LINE\;\Delta E^*_{worst}=\max_{s\in S}\sqrt{\sum_j\max(|LCL_j+s_j|,|UCL_j+s_j|)^2}')
-            st.latex(r'Margin_{LINE}=LINE\;\Delta E^*_{spec}-LINE\;\Delta E^*_{worst}')
-            if _worst_proposed_case is not None and _proposed_margin < 0.01 * line_de_target:
-                st.warning(f'候選界限的 LINE 規格餘裕 = {_proposed_margin:.2f}。請參閱本步驟開頭表1至表3逐項核對，不應視為未來安全保證。')
-            with st.expander('逐批歷史 Shift 最不利 LINE 情境（可下載 Excel）', expanded=False):
-                st.markdown('**原始 IQR 界限**')
-                st.dataframe(_stress_initial.style.format(precision=2),use_container_width=True,hide_index=True)
-                if _stress_proposed is not None:
-                    st.markdown('**最佳化候選界限**')
-                    st.dataframe(_stress_proposed.style.format(precision=2),use_container_width=True,hide_index=True)
-            st.caption('歷史 NG 率 = LINE ΔE* 超過規格的批數 / 該 LAB 條件下完整配對批數。LINE NG 不得預先刪除。')
-            st.warning(f'樣本數 {_hist_lab_ok if "_hist_lab_ok" in locals() else len(_valid_paired)} 批左右時，全部歷史 LINE 合格仍不足以確認未來風險為零。建議累積新批次驗證。')
-            _n_initial=int(_labs['原始 IQR + ΔE* 合格'].sum())
-            _n_new=int(_labs['改善後界限合格'].sum())
-            _summary=pd.DataFrame([
-                {'管制方式':f'現行 LAB ΔE* ≤ {lab_de_target:.2f}', '保留 LAB 批數':_overall_lab_pass,
-                 '完整 LAB 總批數':_total,'保留率 (%)':100*_overall_lab_pass/_total},
-                {'管制方式':'原始 IQR + LAB ΔE*','保留 LAB 批數':_n_initial,
-                 '完整 LAB 總批數':_total,'保留率 (%)':100*_n_initial/_total},
-                {'管制方式':'LINE 風險導向候選 LAB 界限','保留 LAB 批數':_n_new if _b_lo is not None else np.nan,
-                 '完整 LAB 總批數':_total,'保留率 (%)':100*_n_new/_total if _b_lo is not None else np.nan},
+            # RESULT 3 — baseline and candidate compared using identical Shift set.
+            st.markdown('### 5.3 改善前後 LINE 品質風險驗證')
+            _comparison = pd.DataFrame([
+                {'評估項目':'預測 LINE ΔE* 最大值', '原始 IQR':_current_peak, '建議界限':_line_worst},
+                {'評估項目':'LINE ΔE* 規格', '原始 IQR':line_de_target, '建議界限':line_de_target},
+                {'評估項目':'LINE 規格餘裕', '原始 IQR':_current_margin, '建議界限':_proposed_margin},
             ])
-            with st.expander('參考：各方法歷史 LAB 批數（非最佳化目標）',expanded=False):
-                st.dataframe(_summary.style.format({'保留率 (%)':'{:.2f}'},na_rep='—'),
-                    use_container_width=True,hide_index=True)
-
-            st.markdown('### 步驟五｜最終 LAB 管制界限評估與建議')
+            st.dataframe(_comparison.style.format({'原始 IQR':'{:.2f}', '建議界限':'{:.2f}'}, na_rep='—'),
+                         use_container_width=True, hide_index=True)
             if _b_lo is None:
-                _conclusion=(f'本色號現行 LAB ΔE* 規格 ≤ {lab_de_target:.2f}，LINE ΔE* 規格 ≤ {line_de_target:.2f}。'
-                   f'歷史完整配對 {_len_pair if "_len_pair" in locals() else len(_paired)} 批，其中符合 LAB 規格 {len(_valid_paired)} 批。'
-                   '依現有 LAB–LINE Shift 進行最壞情境評估，尚無法建立兼具實質寬度與可驗證 LINE 情境符合性的 LAB 三因子管制界限。'
-                   '不宜以原 IQR 保留批數或無 LINE NG 直接推論管制安全，需擴充歷史配對樣本。')
+                _conclusion = ('依目前配對歷史資料，尚無法提出可通過 LINE 歷史 Shift 壓力測試的有效 LAB 三因子管制區間；'
+                               '應增加代表性生產批次及驗證後再設定界限。')
             else:
-                _conclusion=(f'本色號 LAB ΔE* 規格 ≤ {lab_de_target:.2f}，LINE ΔE* 規格 ≤ {line_de_target:.2f}。'
-                   f'使用 {len(_shift_matrix)} 組 LAB 合格之歷史三維 Shift 進行情境壓力測試。'
-                   f'候選 LAB 三因子界限最不利 LAB ΔE* = {_new_worst:.2f}，LINE 歷史 Shift 最不利情境 ΔE* = {_line_worst:.2f}，規格餘裕 = {_proposed_margin:.2f}。'
-                   '界限係以 LINE 風險情境限制下最大化三因子管制範圍，而非最大化歷史保留批數。'
-                   '歷史 Shift 之 Min/Max/Range/SD 與最不利來源批次已列出；此非未來 Shift 之預測區間。'
-                   '目前樣本有限，且未量化未來 Shift 與測量之不確定性，建議作為初步管制候選，待新批次實測驗證後再正式採用。')
-            st.text_area('報告結論（可複製）',value=_conclusion,height=160,key='task3_line_risk_report')
-            _xlsx=io.BytesIO()
-            with pd.ExcelWriter(_xlsx,engine='openpyxl') as _writer:
-                _check.to_excel(_writer,index=False,sheet_name='Step1_IQR')
-                _flow.to_excel(_writer,index=False,sheet_name='Step1_LAB_Audit')
-                _valid_paired.to_excel(_writer,index=False,sheet_name='Shift_Calibration')
-                if _shift_stats is not None: _shift_stats.to_excel(_writer,index=False,sheet_name='Step2_Shift_Summary')
-                if _stress_initial is not None: _stress_initial.to_excel(_writer,index=False,sheet_name='Step4_IQR_Stress')
-                if _stress_proposed is not None: _stress_proposed.to_excel(_writer,index=False,sheet_name='Step4_Proposed_Stress')
+                _conclusion = (f'原始 IQR 在歷史 Shift 情境下預測 LINE ΔE* 最大為 {_current_peak:.2f}；'
+                               f'候選 LAB 界限之預測最大值為 {_line_worst:.2f}，規格餘裕 {_proposed_margin:.2f}。'
+                               '結果僅為已觀察 Shift 之壓力測試；尚未涵蓋未來 Shift、量測誤差及模型不確定性。'
+                               '建議列為初步候選，待新批次生產驗證。')
+            st.markdown('**初步結論：** ' + _conclusion)
+            st.caption(f'歷史 Shift 來源：{len(_valid_paired)} 批 LAB 規格合格且三因子 LINE 配對完整的批次；LINE NG 不事先排除。歷史情境壓力測試並非未來 NG 機率。')
+
+            # Only one audit expander, rather than multiple technical tables in main report.
+            with st.expander('計算依據與逐批資料（供查核）', expanded=False):
+                st.markdown('**數據來源｜同批 LAB、LINE 與 Shift = LINE − LAB**')
+                st.dataframe(_paired.style.format(precision=2), use_container_width=True, hide_index=True)
+                st.markdown('**Shift 分布（已觀察變動，非未來預測區間）**')
+                if not _shift_stats.empty:
+                    st.dataframe(_shift_stats.style.format(precision=2), use_container_width=True, hide_index=True)
                 if _case_audit is not None:
-                    _case_audit['source'].to_excel(_writer,index=False,sheet_name='Step4_Shift_Source')
-                    _case_audit['prediction'].to_excel(_writer,index=False,sheet_name='Step4_LINE_Calculation')
-                    _case_audit['verification'].to_excel(_writer,index=False,sheet_name='Step4_Risk_Verification')
-                    _case_audit['corners'].to_excel(_writer,index=False,sheet_name='Step4_Eight_Corners')
-                _limits.to_excel(_writer,index=False,sheet_name='Step3_Proposed_Limits')
-                _risk.to_excel(_writer,index=False,sheet_name='Step4_LINE_Risk')
-                _summary.to_excel(_writer,index=False,sheet_name='LAB_Counts_Reference')
-                _labs.to_excel(_writer,index=False,sheet_name='All_LAB_Batches')
-                _paired.to_excel(_writer,index=False,sheet_name='All_Paired_Batches')
+                    st.markdown(f'**最不利 Shift 來源批號：{_case_audit["batch"]}**')
+                    st.dataframe(_case_audit['source'].style.format(precision=2), use_container_width=True, hide_index=True)
+                    st.markdown('**LINE 預測 = LAB 界限點 + 來源 Shift**')
+                    st.dataframe(_case_audit['prediction'].style.format(precision=2), use_container_width=True, hide_index=True)
+                    st.dataframe(_case_audit['verification'].style.format(
+                        {'計算結果':lambda v: f'{v:.2f}' if isinstance(v,(float,np.floating)) else str(v)}),
+                        use_container_width=True, hide_index=True)
+                    st.markdown('**同一 Shift 之八個 LAB 界限角落**')
+                    st.dataframe(_case_audit['corners'].style.format(precision=2), use_container_width=True, hide_index=True)
+                st.latex(r'Shift_{i,j}=LINE_{i,j}-LAB_{i,j}')
+                st.latex(r'\Delta E^*_{LINE,worst}=\max_{s\in S}\sqrt{\sum_j\max(|LCL_j+s_j|,|UCL_j+s_j|)^2}')
+                st.caption('所有判定使用未四捨五入的精度；畫面與 Word、Excel 顯示兩位小數。')
+
+            # Formula-level Excel audit with full numerical precision and 0.00 display.
+            _excel_bytes = io.BytesIO()
+            with pd.ExcelWriter(_excel_bytes, engine='openpyxl') as _writer:
+                _risk_overview.to_excel(_writer, sheet_name='5_1_IQR_Risk', index=False)
+                _limits.to_excel(_writer, sheet_name='5_2_LAB_Limits', index=False)
+                _comparison.to_excel(_writer, sheet_name='5_3_LINE_Compare', index=False)
+                _labs.to_excel(_writer, sheet_name='All_LAB', index=False)
+                _paired.to_excel(_writer, sheet_name='Paired_LAB_LINE', index=False)
+                _valid_paired.to_excel(_writer, sheet_name='Shift_Calibration', index=False)
+                _shift_stats.to_excel(_writer, sheet_name='Shift_Summary', index=False)
+                _stress_initial.to_excel(_writer, sheet_name='IQR_Shift_Stress', index=False)
+                _stress_proposed.to_excel(_writer, sheet_name='Proposed_Shift_Stress', index=False)
+                if _case_audit is not None:
+                    for _sheet,_key in [('Source_Shift','source'),('LINE_Calculation','prediction'),
+                                         ('Risk_Verification','verification'),('Eight_Corners','corners')]:
+                        _case_audit[_key].to_excel(_writer, sheet_name=_sheet, index=False)
                 pd.DataFrame([
-                   {'項目':'LAB ΔE*','公式':'SQRT(LAB_L^2+LAB_a^2+LAB_b^2)','規格':lab_de_target},
-                   {'項目':'LINE ΔE*','公式':'SQRT(LINE_L^2+LINE_a^2+LINE_b^2)','規格':line_de_target},
-                   {'項目':'Shift','公式':'LINE_j-LAB_j (three axes from same batch)','規格':'LAB quality pass, include LINE NG'},
-                   {'項目':'Worst LAB at corners','公式':'SQRT(SUM(MAX(ABS(LCLj),ABS(UCLj))^2))','規格':lab_de_target},
-                   {'項目':'Worst LINE under historical shifts','公式':'MAX_s SQRT(SUM(MAX(ABS(LCLj+s_j),ABS(UCLj+s_j))^2))','規格':line_de_target},
-                   {'項目':'Shift range','公式':'MAX(Shift_j)-MIN(Shift_j)','規格':'Observed only'},
-                   {'項目':'LINE margin','公式':'LINE_SPEC-WORST_HISTORICAL_SHIFT_LINE_DE','規格':line_de_target},
-                   {'項目':'Optimization','公式':'MAX product(UCLj-LCLj) subject to LAB/LINE worst cases','規格':'Historical scenario only, not future guarantee'},
-                ]).to_excel(_writer,index=False,sheet_name='Calculation_Formulas')
-                # Numeric data remain full precision for checks and formulas;
-                # only Excel's visible number format uses two decimal places.
-                for _ws in _writer.book.worksheets:
-                    for _row in _ws.iter_rows(min_row=2):
+                    {'計算項目':'歷史 Shift','公式':'Shift_j = LINE_j − LAB_j'},
+                    {'計算項目':'最不利 LINE ΔE*','公式':'MAX_shift SQRT(SUM_j MAX(ABS(LCL_j+shift_j),ABS(UCL_j+shift_j))^2)'},
+                    {'計算項目':'LINE 規格餘裕','公式':'LINE ΔE* 規格 − 最不利 LINE ΔE*'},
+                    {'計算項目':'最佳化','公式':'MAX PROD_j(UCL_j-LCL_j), subject to LAB and historical-Shift LINE worst-case limits'},
+                ]).to_excel(_writer, sheet_name='Formulas', index=False)
+                for _sheet in _writer.book.worksheets:
+                    _sheet.freeze_panes='A2'
+                    for _row in _sheet.iter_rows(min_row=2):
                         for _cell in _row:
-                            if isinstance(_cell.value, (float, np.floating)) and not isinstance(_cell.value, bool):
-                                _cell.number_format = '0.00' 
-            st.download_button('📥 下載 LINE 風險導向分析 Excel',data=_xlsx.getvalue(),
-                file_name=f'{re.sub(r"[^A-Za-z0-9_-]+","_",str(color))}_Task3_LINE_Risk.xlsx',
-                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',key='task3_line_risk_excel')
+                            if isinstance(_cell.value,(float,np.floating)) and not isinstance(_cell.value,bool):
+                                _cell.number_format='0.00'
+            st.download_button('📥 下載分析與逐批計算 Excel', _excel_bytes.getvalue(),
+                file_name=f'{re.sub(r"[^A-Za-z0-9_-]+","_",str(color))}_LAB_LINE_Risk_Audit.xlsx',
+                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', key='task3_line_risk_excel')
 
     # ---------------------------------------------------------
     # ---------------------------------------------------------
@@ -2741,93 +2651,57 @@ elif app_mode == "🎛️ Control Limit Calculator":
                         "current data. Additional paired LAB and LINE data are required before finalizing the incoming limits."
                     )
 
-            # Five-step validation uses the exact same calculated DataFrames as Task 3.
-            doc.add_heading("8. 歷史數據與 IQR 規格驗證（步驟一）", level=1)
-            if _flow is not None and _check is not None:
-                doc.add_paragraph(f"本次 LAB 規格 ≤ {lab_de_target:.2f}；LINE 規格 ≤ {line_de_target:.2f}。現行 LAB 規格符合 {_overall_lab_pass}/{_total} 批（不套用 IQR）。原始 IQR 最不利組合 ΔE* = {_worst:.2f}。")
-                _wtable = doc.add_table(rows=1, cols=3); _wtable.style = 'Table Grid'
-                for j,v in enumerate(['檢查階段','符合批數','比例 (%)']): _wtable.rows[0].cells[j].text = v
-                for _,r in _flow.iterrows():
-                    c = _wtable.add_row().cells
-                    c[0].text=str(r['檢查階段']);c[1].text=str(r['符合批數']);c[2].text=f"{r['比例 (%)']:.2f}"
-                doc.add_paragraph("公式：Mj=MAX(|LCLj|,|UCLj|)；最大 ΔE*=SQRT(ML²+Ma²+Mb²)。每批 LAB ΔE* 使用同一批號三項值計算。")
-            else:
-                doc.add_paragraph('三項 IQR 尚未完整，無法完成逐批驗證。')
-
-            doc.add_heading("9. LAB–LINE 色差偏移與變動幅度（步驟二）", level=1)
-            doc.add_paragraph('Shift_j = LINE_j − LAB_j；Range_j = MAX(Shift_j) − MIN(Shift_j)；SD_j = SQRT(SUM((Shift_j − Mean_j)^2)/(n−1))。')
-            doc.add_paragraph('僅使用現行 LAB ΔE* 合格且 LAB–LINE 三因子完整配對的批次；LINE NG 不事先排除。最不利情境採用同一製造批號的三維 Shift，不混用不同批次的各因子極值。')
-            if _shift_stats is not None and not _shift_stats.empty:
-                _wt=doc.add_table(rows=1,cols=6); _wt.style='Table Grid'
-                for j,v in enumerate(['因子','n','平均','Min','Max','Range / SD']):_wt.rows[0].cells[j].text=v
-                for _,rr in _shift_stats.iterrows():
-                    cc=_wt.add_row().cells
-                    for j,v in enumerate([rr['因子'],int(rr['樣本數']),f"{rr['平均 Shift']:.2f}",f"{rr['最小 Shift']:.2f}",f"{rr['最大 Shift']:.2f}",f"{rr['變動幅度 (Max-Min)']:.2f} / {rr['標準差 SD']:.2f}"]):cc[j].text=str(v)
-            else:doc.add_paragraph('無足夠配對 Shift 資料。')
-
-            doc.add_heading("10. 考量 LINE 風險之 LAB 界限最佳化（步驟三）", level=1)
+            # Report-ready addendum: directly insert after Table 4 in the main report.
+            doc.add_heading('5. LAB–LINE 產出風險驗證與管制界限最佳化', level=1)
+            doc.add_paragraph(f'本色號：{color}。LAB 進料 ΔE* 規格 ≤ {lab_de_target:.2f}；LINE 產出 ΔE* 規格 ≤ {line_de_target:.2f}。')
+            doc.add_heading('5.1 原始 IQR 界限之 LINE 風險評估', level=2)
+            if _valid_iqr and _risk_overview is not None:
+                tb=doc.add_table(rows=1,cols=2); tb.style='Table Grid'
+                tb.rows[0].cells[0].text='評估項目';tb.rows[0].cells[1].text='結果'
+                for _,r in _risk_overview.iterrows():
+                    c=tb.add_row().cells
+                    c[0].text=str(r['評估項目']); c[1].text=f"{r['結果']:.2f}" if pd.notna(r['結果']) else '—'
+            else: doc.add_paragraph('IQR 資料未完整，無法驗證。')
+            doc.add_heading('5.2 LAB 三因子管制界限最佳化建議', level=2)
             if _limits is not None and not _limits.empty:
-                _wtable=doc.add_table(rows=1,cols=5);_wtable.style='Table Grid'
-                for j,v in enumerate(['因子','IQR LCL','IQR UCL','候選 LCL','候選 UCL']):_wtable.rows[0].cells[j].text=v
+                tb=doc.add_table(rows=1,cols=5);tb.style='Table Grid'
+                for i,v in enumerate(['色差因子','IQR LCL','IQR UCL','建議 LCL','建議 UCL']):tb.rows[0].cells[i].text=v
                 for _,r in _limits.iterrows():
-                    c=_wtable.add_row().cells
-                    for j,v in enumerate([r['因子'],f"{r['原始 IQR LCL']:.2f}",f"{r['原始 IQR UCL']:.2f}",f"{r['改善後 LCL']:.2f}",f"{r['改善後 UCL']:.2f}"]):c[j].text=str(v)
-                doc.add_paragraph('最佳化目標：MAX (UCL_L−LCL_L)×(UCL_a−LCL_a)×(UCL_b−LCL_b)，限制 LAB 所有角落 ΔE* ≤ LAB 規格，並要求每組歷史 Shift 所形成的最不利 LINE ΔE* ≤ LINE 規格。這是數值候選解，不保證全域最佳。')
-                doc.add_paragraph(f'LAB 最不利 ΔE* = {_new_worst:.2f}（規格 {lab_de_target:.2f}）；LINE 歷史情境最不利 ΔE* = {_line_worst:.2f}（規格 {line_de_target:.2f}）。')
-            else:doc.add_paragraph('目前無可用候選 LCL/UCL，請增加 LAB–LINE 配對樣本。')
-
-            doc.add_heading("11. LINE 產出品質風險與最不利情境驗證（步驟四）", level=1)
-            doc.add_paragraph('計算順序：1. 同批 LAB/LINE 實測值 → 2. Shift = LINE − LAB → 3. 將 Shift 套用候選界限點 → 4. 計算預測 LINE ΔE* 與規格餘裕。')
+                    c=tb.add_row().cells
+                    for i,v in enumerate([r['色差因子'],r['原始 IQR LCL'],r['原始 IQR UCL'],r['建議 LAB LCL'],r['建議 LAB UCL']]):
+                        c[i].text=f'{v:.2f}' if isinstance(v,(float,np.floating)) else str(v)
+            else:doc.add_paragraph('目前資料無法產生通過歷史 Shift 情境驗證的候選界限。')
+            doc.add_paragraph('計算依據：於歷史合格 LAB 觀測範圍內，最大化三因子界限寬度乘積；限制 LAB 界限角落 ΔE* 不超規，且所有歷史配對 Shift 的最不利 LINE ΔE* 不超規。')
+            doc.add_heading('5.3 改善前後 LINE 品質風險驗證',level=2)
+            if _valid_iqr and _comparison is not None:
+                tb=doc.add_table(rows=1,cols=3);tb.style='Table Grid'
+                for i,v in enumerate(['評估項目','原始 IQR','建議界限']):tb.rows[0].cells[i].text=v
+                for _,r in _comparison.iterrows():
+                    c=tb.add_row().cells
+                    c[0].text=str(r['評估項目'])
+                    for i,key in enumerate(['原始 IQR','建議界限'],start=1):
+                        c[i].text=f'{r[key]:.2f}' if pd.notna(r[key]) else '—'
+            if _conclusion is not None:doc.add_paragraph('結論：'+_conclusion)
+            doc.add_paragraph('註：本結果僅為歷史 Shift 最不利情境測試，並非對未來 LINE 品質或超規率之保證。')
+            # One compact audit appendix, no repeated tables in the main report.
             if _case_audit is not None:
-                doc.add_heading('表11-1｜歷史 Shift 實測來源與逐項計算',level=2)
-                doc.add_paragraph(f'資料來源：製造批號 {_case_audit["batch"]}；Shift_j = LINE 實測_j − LAB 實測_j。')
-                _tb=doc.add_table(rows=1,cols=5);_tb.style='Table Grid'
-                for j,v in enumerate(['因子','LAB 實測','LINE 實測','Shift','計算公式']):_tb.rows[0].cells[j].text=v
-                for _,rr in _case_audit['source'].iterrows():
-                    cc=_tb.add_row().cells
-                    for j,v in enumerate([rr['色差因子'],f'{rr["來源 LAB 實測值"]:.2f}',f'{rr["來源 LINE 實測值"]:.2f}',f'{rr["Shift = LINE − LAB"]:.2f}',rr['計算公式']]):cc[j].text=str(v)
-                doc.add_heading('表11-2｜LAB 界限點、Shift 與預測 LINE 計算',level=2)
-                doc.add_paragraph('LINE 預測_j = 候選 LAB 最不利點_j + 來源 Shift_j；LINE ΔE* = SQRT(SUM(LINE 預測_j²))。')
-                _tb=doc.add_table(rows=1,cols=5);_tb.style='Table Grid'
-                for j,v in enumerate(['因子','LAB 界限點','Shift','LINE 預測','LINE 平方']):_tb.rows[0].cells[j].text=v
-                for _,rr in _case_audit['prediction'].iterrows():
-                    cc=_tb.add_row().cells
-                    for j,v in enumerate([rr['色差因子'],f'{rr["候選 LAB 最不利點 (A)"]:.2f}',f'{rr["來源 Shift (B)"]:.2f}',f'{rr["LINE 預測值 (A+B)"]:.2f}',f'{rr["預測 LINE 平方"]:.2f}']):cc[j].text=str(v)
-                doc.add_heading('表11-3｜LINE ΔE* 及規格餘裕計算',level=2)
-                _tb=doc.add_table(rows=1,cols=3);_tb.style='Table Grid'
-                for j,v in enumerate(['檢驗項目','資料來源／公式','計算結果']):_tb.rows[0].cells[j].text=v
-                for _,rr in _case_audit['verification'].iterrows():
-                    cc=_tb.add_row().cells
-                    val=rr['計算結果']
-                    for j,v in enumerate([rr['驗證項目'],rr['計算公式 / 資料來源'],f'{val:.2f}' if isinstance(val,(float,np.floating)) else str(val)]):cc[j].text=str(v)
-                doc.add_paragraph('計算及判定使用未四捨五入之數值；顯示為方便閱讀而取小數。'
-                                  '來源 Shift 三因子均來自同一批次。每個來源 Shift 配合八個 LAB 界限角落檢查，'
-                                  '選擇全部來源中 LINE ΔE* 最高之情境；完整角落數據請參閱 Excel。')
-            else:
-                doc.add_paragraph('無法建立實測資料至預測值的逐項追溯表；本次不提供可供確認的最不利情境計算結果。')
-            doc.add_heading('表11-4｜各管制方式之歷史結果與情境比較',level=2)
-
-            if _risk is not None:
-                _wtable=doc.add_table(rows=1,cols=5);_wtable.style='Table Grid'
-                for j,v in enumerate(['管制方式','配對批數','LINE NG','歷史 NG (%)','Shift 情境最不利 ΔE*']):_wtable.rows[0].cells[j].text=v
-                for _,r in _risk.iterrows():
-                    c=_wtable.add_row().cells
-                    vals=[r['管制方式'],r['LAB 合格且 LINE 完整配對批數'],r['LINE NG 批數'],r['歷史 LINE NG (%)'],r['LINE 情境最不利 ΔE*']]
-                    for j,v in enumerate(vals):c[j].text=f'{v:.2f}' if isinstance(v,(float,np.floating)) and np.isfinite(v) else ('—' if pd.isna(v) else str(v))
-            doc.add_paragraph('LINE 最不利情境 = MAX_s SQRT(SUM_j(MAX(|LCL_j+s_j|,|UCL_j+s_j|)^2))。LINE 規格餘裕 = LINE 規格 − LINE 最不利情境。')
-            doc.add_paragraph('判讀：若最不利 LINE ΔE* 超過規格，表示目前界限在已觀察 Shift 情境下存在超規可能；若等於規格，表示餘裕趨近零。歷史情境壓力測試不等於未來 NG 機率，未涵蓋未觀測 Shift 及量測不確定性。')
-
-            doc.add_heading("12. 最終 LAB 管制界限評估與建議（步驟五）", level=1)
-            if _conclusion is not None:doc.add_paragraph(_conclusion)
-            else:doc.add_paragraph('待三項 IQR 與 LAB–LINE 配對資料完整後，再提出最終建議。')
-            if _summary is not None:
-                doc.add_heading('附錄：歷史 LAB 批數（僅供參考，非最佳化目標）',level=2)
-                _wt=doc.add_table(rows=1,cols=3);_wt.style='Table Grid'
-                for j,v in enumerate(['管制方式','保留批數','保留率 (%)']):_wt.rows[0].cells[j].text=v
-                for _,r in _summary.iterrows():
-                    cc=_wt.add_row().cells
-                    for j,v in enumerate([r['管制方式'],r['保留 LAB 批數'],r['保留率 (%)']]):
-                        cc[j].text=f'{v:.2f}' if isinstance(v,(float,np.floating)) and np.isfinite(v) else ('—' if pd.isna(v) else str(v))
+                doc.add_heading('附錄｜最不利情境計算依據',level=1)
+                doc.add_paragraph(f'來源批號：{_case_audit["batch"]}；Shift = 同批 LINE 實測 − LAB 實測。')
+                tb=doc.add_table(rows=1,cols=4);tb.style='Table Grid'
+                for i,v in enumerate(['因子','來源 LAB','來源 LINE','Shift']):tb.rows[0].cells[i].text=v
+                for _,r in _case_audit['source'].iterrows():
+                    c=tb.add_row().cells
+                    for i,v in enumerate([r['色差因子'],r['來源 LAB 實測值'],r['來源 LINE 實測值'],r['Shift = LINE − LAB']]):
+                        c[i].text=f'{v:.2f}' if isinstance(v,(float,np.floating)) else str(v)
+                doc.add_paragraph('預測 LINE_j = LAB 界限點_j + 來源 Shift_j；LINE ΔE* = SQRT(ΔL*² + Δa*² + Δb*²)。')
+                tb=doc.add_table(rows=1,cols=4);tb.style='Table Grid'
+                for i,v in enumerate(['因子','LAB 界限點','Shift','LINE 預測']):tb.rows[0].cells[i].text=v
+                for _,r in _case_audit['prediction'].iterrows():
+                    c=tb.add_row().cells
+                    for i,v in enumerate([r['色差因子'],r['候選 LAB 最不利點 (A)'],r['來源 Shift (B)'],r['LINE 預測值 (A+B)']]):
+                        c[i].text=f'{v:.2f}' if isinstance(v,(float,np.floating)) else str(v)
+                doc.add_paragraph(f'LINE ΔE* 最不利預測 = {_case_audit["de"]:.2f}；規格餘裕 = {_case_audit["margin"]:.2f}。')
+                doc.add_paragraph('各組歷史 Shift 與八個 LAB 界限角落的完整核算詳見 Excel。所有判定使用未四捨五入數值。')
 
             # Footer
             for sec in doc.sections:
