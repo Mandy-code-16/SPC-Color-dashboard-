@@ -2140,8 +2140,58 @@ elif app_mode == "🎛️ Control Limit Calculator":
             for _kind, _col in (("lcl", _recommended_columns[0]), ("ucl", _recommended_columns[1])):
                 if pd.isna(_defaults.at[_idx, _col]):
                     _defaults.at[_idx, _col] = round(float(calc_res[_factor][f"iqr_{_kind}"]), 2)
-        if _manual_key not in st.session_state:
-            st.session_state[_manual_key] = _defaults.copy()
+        # Session-state migration: earlier app versions stored a different
+        # DataFrame schema under the same key.  Normalize it before indexing.
+        # Always align rows to the current factor order; never trust positional
+        # old data from an unrelated color or malformed state.
+        def _normalize_saved_limits(saved, defaults, factors):
+            result = defaults.copy().reset_index(drop=True)
+            if isinstance(saved, pd.DataFrame):
+                legacy = saved.copy().reset_index(drop=True)
+            elif isinstance(saved, dict):
+                try:
+                    legacy = pd.DataFrame(saved).reset_index(drop=True)
+                except (ValueError, TypeError):
+                    return result
+            else:
+                return result
+            # Match old source-column aliases, preserving valid user edits.
+            aliases = {
+                "Recommended LAB LCL": ["Recommended LAB LCL", "人工確認 LCL", "LCL", "LAB LCL"],
+                "Recommended LAB UCL": ["Recommended LAB UCL", "人工確認 UCL", "UCL", "LAB UCL"],
+            }
+            factor_col = next((c for c in ("Factor", "因子") if c in legacy.columns), None)
+            factor_aliases = {"ΔL": "ΔL*", "Δa": "Δa*", "Δb": "Δb*"}
+            for dest_col, candidates in aliases.items():
+                existing = next((c for c in candidates if c in legacy.columns), None)
+                if existing is None:
+                    continue
+                if factor_col is not None:
+                    names = legacy[factor_col].astype(str).str.strip().replace(factor_aliases)
+                    for idx, factor in enumerate(factors):
+                        positions = names.index[names == factor].tolist()
+                        if not positions:
+                            positions = names.index[names == factor + "*"].tolist()
+                        if positions:
+                            value = pd.to_numeric(pd.Series([legacy.at[positions[0], existing]]), errors="coerce").iloc[0]
+                            if pd.notna(value) and np.isfinite(value):
+                                result.at[idx, dest_col] = float(value)
+                elif len(legacy) == len(factors):
+                    values = pd.to_numeric(legacy[existing], errors="coerce")
+                    for idx, value in enumerate(values):
+                        if pd.notna(value) and np.isfinite(value):
+                            result.at[idx, dest_col] = float(value)
+            return result
+
+        _previous_limits = st.session_state.get(_manual_key)
+        _normalized_limits = _normalize_saved_limits(_previous_limits, _defaults, factors)
+        # Invalid old LCL/UCL pairs are replaced with fresh calculated defaults.
+        for _idx in range(len(factors)):
+            _lo = _normalized_limits.at[_idx, _recommended_columns[0]]
+            _hi = _normalized_limits.at[_idx, _recommended_columns[1]]
+            if not (np.isfinite(_lo) and np.isfinite(_hi) and _lo < _hi):
+                _normalized_limits.loc[_idx, _recommended_columns] = _defaults.loc[_idx, _recommended_columns]
+        st.session_state[_manual_key] = _normalized_limits
         if _reset_key not in st.session_state:
             st.session_state[_reset_key] = 0
 
