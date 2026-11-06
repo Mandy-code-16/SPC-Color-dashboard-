@@ -2921,7 +2921,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
 
         safe_color_name = re.sub(r"[^A-Za-z0-9_-]+", "_", str(color))
         report_state_key = "task3_export_payload"
-        report_identity = ("ORIGINAL_WORD_COMPLETE_RESTORED_V2", tuple(_start_lcl), tuple(_start_ucl), uploaded_data_file.name, uploaded_data_file.size,
+        report_identity = ("WORD_CHARTS_VERIFIED_V3", tuple(_start_lcl), tuple(_start_ucl), uploaded_data_file.name, uploaded_data_file.size,
                            uploaded_limit_file.name, uploaded_limit_file.size,
                            str(color), tuple(selected_years), tuple(selected_months),
                            float(lab_de_target), float(line_de_target))
@@ -2930,7 +2930,64 @@ elif app_mode == "🎛️ Control Limit Calculator":
             st.session_state["task3_export_identity"] = report_identity
         if st.button("📄 Prepare Word Report", key="task3_prepare_word"):
             with st.spinner("Generating high-resolution report charts and Word file..."):
-                st.session_state[report_state_key] = build_task3_word_report()
+                # Restore the ORIGINAL pre-export chart generation. Without this,
+                # report_chart_buffers remains empty and the original Word chart
+                # page is silently skipped by its `if all(...)` guard.
+                report_chart_buffers.clear()
+                missing_report_factors = []
+                for _factor in factors:
+                    _res = calc_res.get(_factor)
+                    _pair = _res.get("pair") if _res is not None else None
+                    if _pair is None or _pair.empty:
+                        missing_report_factors.append(_factor)
+                        continue
+                    _report_fig = None
+                    try:
+                        _report_fig = build_task3_report_chart(_pair, _factor)
+                        _report_buf = io.BytesIO()
+                        _report_fig.savefig(
+                            _report_buf, format="png", dpi=500,
+                            bbox_inches="tight", facecolor="white",
+                            pad_inches=0.04,
+                        )
+                        _png_bytes = _report_buf.getvalue()
+                        if not _png_bytes:
+                            raise ValueError(f"Empty chart PNG for {_factor}")
+                        report_chart_buffers[_factor] = _png_bytes
+                    finally:
+                        if _report_fig is not None:
+                            plt.close(_report_fig)
+
+                if missing_report_factors:
+                    st.error(
+                        "Word chart page cannot be generated: missing paired "
+                        "LAB/LINE data for " + ", ".join(missing_report_factors)
+                        + ". No incomplete Word report has been generated."
+                    )
+                    st.session_state.pop(report_state_key, None)
+                else:
+                    # All three images must be present before saving DOCX.
+                    # Never silently ship a Word report without the chart page.
+                    missing_images = [f for f in factors if f not in report_chart_buffers]
+                    if missing_images:
+                        st.error("Chart generation incomplete: " + ", ".join(missing_images))
+                        st.session_state.pop(report_state_key, None)
+                    else:
+                        _word_bytes = build_task3_word_report()
+                        # Verify embedded media exist in the actual DOCX, not
+                        # just inside the in-memory plot dictionaries.
+                        import zipfile
+                        with zipfile.ZipFile(io.BytesIO(_word_bytes)) as _docx_zip:
+                            _embedded_images = [n for n in _docx_zip.namelist()
+                                                if n.startswith("word/media/") and n.lower().endswith(".png")]
+                        if len(_embedded_images) < 3:
+                            st.error(
+                                f"Word chart verification failed: only {len(_embedded_images)} "
+                                "embedded PNG images were found (expected 3)."
+                            )
+                            st.session_state.pop(report_state_key, None)
+                        else:
+                            st.session_state[report_state_key] = _word_bytes
         if st.session_state.get(report_state_key):
             st.download_button(
                 label="📄 Download Word Report",
