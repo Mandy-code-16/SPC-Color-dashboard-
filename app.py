@@ -2010,6 +2010,9 @@ elif app_mode == "🎛️ Control Limit Calculator":
             st.warning('所選期間沒有三因子完整的 LAB 批次，無法進行後續驗證。')
         else:
             _labs['LAB ΔE*'] = np.linalg.norm(_lab_arr, axis=1)
+            _overall_lab_pass = int((_labs['LAB ΔE*'] <= lab_de_target + _tol).sum())
+            st.markdown('#### 歷史進料品質與 IQR 篩選為不同判定')
+            st.caption(f'依原始批次 LAB ΔE* ≤ {lab_de_target:.3f} 判定：{_overall_lab_pass}/{_total} 批合格（{100*_overall_lab_pass/_total:.2f}%）。此為進料規格符合率，不等於三因子 IQR 保留率。')
             _factor_ok = (_lab_arr >= _lo - _tol) & (_lab_arr <= _hi + _tol)
             for _j, _f in enumerate(_names):
                 _labs[f'{_f} IQR 判定'] = np.where(_factor_ok[:, _j], 'OK', 'NG')
@@ -2079,6 +2082,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 st.error('資料一致性警示：改善後界限保留數不可大於原始 IQR + ΔE*，請檢查輸入資料。')
 
             st.markdown('### 步驟四｜LINE 產出品質風險驗證')
+            st.caption('以下 LINE 風險表為「通過相應 LAB 管制方式」的條件式評估，不代表全部歷史 LINE 品質合格率。')
             _line_columns = [f'LINE_{f}' for f in _factors]
             # LINE values are aggregated with the SAME existing row-level N/S
             # average and batch average rule; do not filter out LINE NG.
@@ -2094,6 +2098,10 @@ elif app_mode == "🎛️ Control Limit Calculator":
             _plab_arr = _paired[_lab_keys].to_numpy(float)
             _paired['LINE ΔE*'] = np.linalg.norm(_line_arr,axis=1)
             _paired['LINE NG'] = _paired['LINE ΔE*'] > line_de_target+_tol
+            _hist_total = len(_paired)
+            _hist_lab_ok = int((_paired['LAB ΔE*'] <= lab_de_target + _tol).sum())
+            _hist_line_ok = int((~_paired['LINE NG']).sum())
+            st.info(f'全體完整配對批次：{_hist_total}；其中 LAB ΔE* ≤ {lab_de_target:.3f}：{_hist_lab_ok} 批；LINE ΔE* ≤ {line_de_target:.3f}：{_hist_line_ok} 批。下表則依各 LAB 管制界限進一步篩選。')
             for _j,_f in enumerate(_factors):
                 _paired[f'Shift_{_f}'] = _line_arr[:,_j]-_plab_arr[:,_j]
             _method_names = [('原始 IQR + LAB ΔE*','原始 IQR + ΔE* 合格',_lo,_hi,'A'),
@@ -2131,6 +2139,8 @@ elif app_mode == "🎛️ Control Limit Calculator":
                     _scenarios[_key]['shift_batches']=_subset['製造批號'].to_list()
                 _cached={'signature':_sig,'scenarios':_scenarios}
                 st.session_state['task3_stepwise_simulation']=_cached
+            if not _cached:
+                st.info('模擬尚未執行。請按上方模擬按鈕；若可用 Shift 少於 3 批，系統會說明樣本不足，不會虛構模擬結果。')
             if _cached:
                 for _i,_key in enumerate(('A','B')):
                     _sim=_cached['scenarios'].get(_key,{})
@@ -2139,7 +2149,11 @@ elif app_mode == "🎛️ Control Limit Calculator":
                         _risk.loc[_i,'模擬 LINE ΔE* P95']=_sim['p95']
                     elif 'error' in _sim:
                         st.info(f'{_method_names[_i][0]}：{_sim["error"]}')
-            st.dataframe(_risk.style.format({'歷史 LINE NG (%)':'{:.2f}', '模擬 LINE NG (%)':'{:.2f}',
+            _risk_display = _risk.copy()
+            _risk_display['模擬狀態'] = ['樣本不足（Shift 少於 3 批）' if n < 3 else
+                                        ('已計算' if _cached and 'n' in _cached['scenarios'].get(key,{}) else '尚未執行')
+                                        for n,key in zip(_risk_display['Shift 可用批數'],('A','B'))]
+            st.dataframe(_risk_display.style.format({'歷史 LINE NG (%)':'{:.2f}', '模擬 LINE NG (%)':'{:.2f}',
                            '模擬 LINE ΔE* P95':'{:.4f}'},na_rep='—'),use_container_width=True,hide_index=True)
             st.caption(f'歷史 LINE NG (%) = LAB 符合該管制方式且 LINE ΔE* > {line_de_target:.3f} 批數 ÷ 該管制方式 LAB 合格且 LINE 三因子完整批數 × 100%。')
             st.caption(f'模擬 Shift 僅取符合該方式 LAB 界限與 LAB ΔE* ≤ {lab_de_target:.3f} 的配對批次；LINE NG 仍保留。三項 Shift 從同一批次一起抽樣。LAB 在允許區域均勻抽樣是假設，模擬率並非已證實未來不良率。')
