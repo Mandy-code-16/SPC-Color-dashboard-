@@ -2136,6 +2136,60 @@ elif app_mode == "🎛️ Control Limit Calculator":
             "incoming LAB values associated with acceptable LINE outputs whenever current LINE limits are available."
         )
 
+        # User-confirmed starting LAB bounds. Statistics above remain read-only.
+        # Values are stored separately for every color, so changing colors does
+        # not carry over another paint code's manual decisions.
+        _manual_key = f"task3_manual_start_limits_{str(color)}"
+        _suggested_bounds = pd.DataFrame({
+            "因子": ["ΔL*", "Δa*", "Δb*"],
+            "確認 LCL": [round(float(calc_res[f]["rec_lcl"]), 2)
+                       if calc_res[f]["rec_lcl"] is not None else float("nan") for f in factors],
+            "確認 UCL": [round(float(calc_res[f]["rec_ucl"]), 2)
+                       if calc_res[f]["rec_ucl"] is not None else float("nan") for f in factors],
+        })
+        # Fall back to IQR if Standard and IQR do not overlap.
+        for _i, _f in enumerate(factors):
+            if not np.isfinite(_suggested_bounds.loc[_i, "確認 LCL"]):
+                _suggested_bounds.loc[_i, "確認 LCL"] = round(float(calc_res[_f]["iqr_lcl"]), 2)
+            if not np.isfinite(_suggested_bounds.loc[_i, "確認 UCL"]):
+                _suggested_bounds.loc[_i, "確認 UCL"] = round(float(calc_res[_f]["iqr_ucl"]), 2)
+        if _manual_key not in st.session_state:
+            st.session_state[_manual_key] = _suggested_bounds.copy()
+        st.markdown("### ✍️ 人工確認 LAB 初始管制界限（後續分析依此計算）")
+        st.caption("上方 IQR / Standard 統計結果不變。可依標準法、IQR、交集或現場使用方便的二位小數調整下表；"
+                   "下方 Shift 風險比較及 Word / Excel 將以**人工確認界限**為基準。")
+        _editor_version_key = f"task3_manual_editor_version_{str(color)}"
+        if _editor_version_key not in st.session_state:
+            st.session_state[_editor_version_key] = 0
+        if st.button("↩ 恢復統計建議值", key=f"task3_reset_manual_{str(color)}"):
+            st.session_state[_manual_key] = _suggested_bounds.copy()
+            st.session_state[_editor_version_key] += 1
+            st.rerun()
+        _editable_bounds = st.data_editor(
+            st.session_state[_manual_key],
+            column_config={
+                "因子": st.column_config.TextColumn("因子", disabled=True),
+                "確認 LCL": st.column_config.NumberColumn("確認 LCL", format="%.2f", step=0.01, required=True),
+                "確認 UCL": st.column_config.NumberColumn("確認 UCL", format="%.2f", step=0.01, required=True),
+            },
+            disabled=["因子"], hide_index=True, use_container_width=True,
+            num_rows="fixed", key=f"task3_manual_editor_{str(color)}_{st.session_state[_editor_version_key]}"
+        )
+        st.session_state[_manual_key] = _editable_bounds.copy()
+        _start_lcl = pd.to_numeric(_editable_bounds["確認 LCL"], errors="coerce").to_numpy(float)
+        _start_ucl = pd.to_numeric(_editable_bounds["確認 UCL"], errors="coerce").to_numpy(float)
+        _manual_valid = (len(_start_lcl) == 3 and len(_start_ucl) == 3
+                         and np.isfinite(_start_lcl).all() and np.isfinite(_start_ucl).all()
+                         and np.all(_start_lcl < _start_ucl))
+        if not _manual_valid:
+            st.error("人工確認界限無效：各因子必須為數值，且 LCL 必須小於 UCL。請先修正後再分析。")
+            st.stop()
+        _manual_peak = float(np.linalg.norm(np.maximum(np.abs(_start_lcl),np.abs(_start_ucl))))
+        st.caption(f"人工確認界限最不利 LAB ΔE* = {_manual_peak:.2f}；本色號規格 ≤ {lab_de_target:.2f}。"
+                       "超過規格仍可進行風險評估，但不代表已通過 LAB 驗證。")
+        _selected_limits_df = pd.DataFrame({"因子":["ΔL*","Δa*","Δb*"],
+                                            "人工確認 LCL":_start_lcl,"人工確認 UCL":_start_ucl})
+
         dE_std = math.sqrt(dE_std_sq)
         dE_iqr = math.sqrt(dE_iqr_sq)
         dE_rec = math.sqrt(dE_rec_sq) if recommendation_valid else None
@@ -2213,8 +2267,10 @@ elif app_mode == "🎛️ Control Limit Calculator":
     if not _valid_iqr:
         st.warning('請先完成三個色差因子的 IQR 管制界限計算。')
     else:
-        _lo = np.array([calc_res[f]['iqr_lcl'] for f in _factors], float)
-        _hi = np.array([calc_res[f]['iqr_ucl'] for f in _factors], float)
+        # Important: the starting bounds are explicitly confirmed by the user,
+        # not silently replaced with raw IQR or Standard limits.
+        _lo = _start_lcl.copy()
+        _hi = _start_ucl.copy()
         _tol = 1e-10
         # LAB acceptance is independent of LINE availability and IQR inclusion.
         _input_columns = ['入料檢測 ΔL 正面', '入料檢測 Δa 正面', '入料檢測 Δb 正面']
@@ -2228,8 +2284,8 @@ elif app_mode == "🎛️ Control Limit Calculator":
             _labs['LAB ΔE*'] = np.linalg.norm(_labs[_lab_keys].to_numpy(float), axis=1)
             _labs['LAB 規格合格'] = _labs['LAB ΔE*'] <= lab_de_target + _tol
             _arr = _labs[_lab_keys].to_numpy(float)
-            _labs['三因子 IQR 合格'] = np.all((_arr >= _lo - _tol) & (_arr <= _hi + _tol), axis=1)
-            _labs['原始 IQR + ΔE* 合格'] = _labs['三因子 IQR 合格'] & _labs['LAB 規格合格']
+            _labs['三因子人工確認界限合格'] = np.all((_arr >= _lo - _tol) & (_arr <= _hi + _tol), axis=1)
+            _labs['人工確認界限 + ΔE* 合格'] = _labs['三因子人工確認界限合格'] & _labs['LAB 規格合格']
 
             # Paired batch averages: NORTH/SOUTH per row, then batch mean.
             _line_parts = []
@@ -2274,7 +2330,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
             _risk_overview = pd.DataFrame([
                 {'評估項目':'LAB ΔE* 規格', '結果':lab_de_target},
                 {'評估項目':'LINE ΔE* 規格', '結果':line_de_target},
-                {'評估項目':'原始 IQR：LINE 保守上界', '結果':_current_envelope},
+                {'評估項目':'人工確認初始界限：LINE 保守上界', '結果':_current_envelope},
                 {'評估項目':'LINE 規格餘裕', '結果':_current_margin},
             ])
 
@@ -2290,7 +2346,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 _new_worst=float(_opt['lab_worst'])
                 _line_worst=float(_opt['line_worst'])
                 _limits=pd.DataFrame({
-                    '因子':_names,'原 IQR LCL':_lo,'原 IQR UCL':_hi,
+                    '因子':_names,'人工確認 LCL':_lo,'人工確認 UCL':_hi,
                     '建議 LAB LCL':_b_lo,'建議 LAB UCL':_b_hi,
                 })
                 st.dataframe(_limits.style.format(precision=2),use_container_width=True,hide_index=True)
@@ -2308,17 +2364,17 @@ elif app_mode == "🎛️ Control Limit Calculator":
 
             st.markdown('### 表二｜改善前後 LINE 品質驗證')
             _comparison = pd.DataFrame([
-                {'評估項目':'LINE 保守上界（Shift Min/Max）','原始 IQR':_current_envelope,'建議界限':_line_worst},
-                {'評估項目':'LINE ΔE* 規格','原始 IQR':line_de_target,'建議界限':line_de_target},
-                {'評估項目':'LINE 規格餘裕','原始 IQR':_current_margin,'建議界限':_proposed_margin},
+                {'評估項目':'LINE 保守上界（Shift Min/Max）','人工確認初始界限':_current_envelope,'建議界限':_line_worst},
+                {'評估項目':'LINE ΔE* 規格','人工確認初始界限':line_de_target,'建議界限':line_de_target},
+                {'評估項目':'LINE 規格餘裕','人工確認初始界限':_current_margin,'建議界限':_proposed_margin},
             ])
-            st.dataframe(_comparison.style.format({'原始 IQR':'{:.2f}','建議界限':'{:.2f}'},na_rep='—'),
+            st.dataframe(_comparison.style.format({'人工確認初始界限':'{:.2f}','建議界限':'{:.2f}'},na_rep='—'),
                          use_container_width=True,hide_index=True)
             if _b_lo is None:
                 _conclusion = ('按歷史 Shift Min/Max 的保守範圍，目前尚無法用簡易反推法提出可通過雙重規格的 LAB 界限；'
                                '需擴充資料及確認製程變動。')
             else:
-                _conclusion = (f'改善前 LINE 保守上界 {_current_envelope:.2f}，改善後 {_line_worst:.2f}；'
+                _conclusion = (f'人工確認界限下 LINE 保守上界 {_current_envelope:.2f}，改善後 {_line_worst:.2f}；'
                                f'規格餘裕 {_proposed_margin:.2f}。此為歷史 Shift 範圍的保守測試，'
                                '未包含未來新增的變動與量測不確定性，建議先行試行並持續驗證。')
             st.markdown('**初步結論：** '+_conclusion)
@@ -2394,7 +2450,8 @@ elif app_mode == "🎛️ Control Limit Calculator":
             _excel_bytes = io.BytesIO()
             with pd.ExcelWriter(_excel_bytes, engine='openpyxl') as _writer:
                 _shift_range_table.to_excel(_writer, sheet_name='5_1_Shift_Range', index=False)
-                _risk_overview.to_excel(_writer, sheet_name='IQR_Risk', index=False)
+                _risk_overview.to_excel(_writer, sheet_name='Confirmed_Start_Risk', index=False)
+                _selected_limits_df.to_excel(_writer, sheet_name='Confirmed_Input_Limits', index=False)
                 _limits.to_excel(_writer, sheet_name='5_2_LAB_Limits', index=False)
                 _comparison.to_excel(_writer, sheet_name='5_3_LINE_Compare', index=False)
                 if not _appendix_center.empty:
@@ -2406,7 +2463,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 _paired.to_excel(_writer, sheet_name='Paired_LAB_LINE', index=False)
                 _valid_paired.to_excel(_writer, sheet_name='Shift_Calibration', index=False)
                 _shift_stats.to_excel(_writer, sheet_name='Shift_Summary', index=False)
-                _stress_initial.to_excel(_writer, sheet_name='IQR_Shift_Stress', index=False)
+                _stress_initial.to_excel(_writer, sheet_name='Confirmed_Shift_Stress', index=False)
                 _stress_proposed.to_excel(_writer, sheet_name='Proposed_Shift_Stress', index=False)
                 if _case_audit is not None:
                     for _sheet,_key in [('Source_Shift','source'),('LINE_Calculation','prediction'),
@@ -2477,8 +2534,11 @@ elif app_mode == "🎛️ Control Limit Calculator":
             doc.add_heading('5. LAB 入料管制界限初步建議與 LINE 品質驗證', level=1)
             doc.add_paragraph(f'塗料編號：{color}；LAB ΔE* 規格 ≤ {lab_de_target:.2f}；'
                               f'LINE ΔE* 規格 ≤ {line_de_target:.2f}。')
-            doc.add_paragraph('本研究以原始 IQR 為統計參考，並依歷史 LAB–LINE 色差偏移，'
+            doc.add_paragraph('本研究以人工確認之初始界限（可參考 IQR 與標準差法）為比較基準，並依歷史 LAB–LINE 色差偏移，'
                               '初步建立三項入料色差管制範圍；詳細計算及資料來源列於附錄。')
+            doc.add_paragraph('初始界限來源：人工確認（可採 IQR、標準差法或調整值）；原始統計結果不受更改。')
+            doc.add_paragraph('表｜人工確認初始管制界限')
+            add_table(_selected_limits_df)
             doc.add_paragraph('表｜LAB 初步建議管制界限')
             add_table(_limits)
             doc.add_paragraph('表｜改善前後 LINE 品質驗證')
@@ -2524,6 +2584,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
                               '因此顯示數字直接重算可能有末位差異。')
 
             doc.add_heading('A5. LINE 最不利情境確認', level=2)
+            doc.add_paragraph('比較基準為使用者人工確認之 LAB 三因子初始界限，而非自動計算的 IQR 界限。')
             add_table(_comparison)
             doc.add_paragraph('LINE 規格餘裕 = LINE ΔE* 規格 − LINE 保守最不利值。'
                               '保守情境將三因子 Shift 的觀測極值獨立組合，'
@@ -2538,7 +2599,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
 
         safe_color_name = re.sub(r"[^A-Za-z0-9_-]+", "_", str(color))
         report_state_key = "task3_export_payload"
-        report_identity = ("SIMPLE_SHIFT_MAIN_APPENDIX_V2", uploaded_data_file.name, uploaded_data_file.size,
+        report_identity = ("USER_CONFIRMED_INPUT_LIMITS_V1", tuple(_start_lcl), tuple(_start_ucl), uploaded_data_file.name, uploaded_data_file.size,
                            uploaded_limit_file.name, uploaded_limit_file.size,
                            str(color), tuple(selected_years), tuple(selected_months),
                            float(lab_de_target), float(line_de_target))
