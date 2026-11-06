@@ -2190,8 +2190,6 @@ elif app_mode == "🎛️ Control Limit Calculator":
     _summary = pd.DataFrame()
     _shift_stats = pd.DataFrame()
     _shift_range_table = pd.DataFrame()
-    _backcalc_detail = pd.DataFrame()
-    _backcalc_formula = pd.DataFrame()
     _opt = {}
     _case_audit = None
     _stress_initial = pd.DataFrame()
@@ -2255,7 +2253,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
             # REPORT-READY THREE STEPS: Shift range -> backwards LAB bounds -> LINE check.
             _shift_min = _shift_matrix.min(axis=0) if len(_shift_matrix) else None
             _shift_max = _shift_matrix.max(axis=0) if len(_shift_matrix) else None
-            st.markdown('### 5.1 LAB–LINE 歷史 Shift 變動分析')
+            st.markdown('### 歷史 LAB–LINE Shift 摘要（供分析）')
             if _shift_min is not None:
                 _shift_range_table = pd.DataFrame({
                     '因子':_names, 'Shift 最小值':_shift_min, 'Shift 最大值':_shift_max,
@@ -2280,7 +2278,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 {'評估項目':'LINE 規格餘裕', '結果':_current_margin},
             ])
 
-            st.markdown('### 5.2 依 Shift 變動反推 LAB 建議界限')
+            st.markdown('### 表一｜LAB 初步建議管制界限')
             _opt = task3_line_risk_box(_valid_paired[_lab_keys].to_numpy(float),
                                        _shift_matrix, lab_de_target, line_de_target)
             if 'error' in _opt:
@@ -2296,43 +2294,6 @@ elif app_mode == "🎛️ Control Limit Calculator":
                     '建議 LAB LCL':_b_lo,'建議 LAB UCL':_b_hi,
                 })
                 st.dataframe(_limits.style.format(precision=2),use_container_width=True,hide_index=True)
-
-                # Reproducible calculation chain: Shift extrema -> raw/clipped center
-                # -> observed valid LAB endpoints -> solved t -> recommended LCL/UCL.
-                # All calculations below retain full precision; formatting alone is 0.00.
-                _backcalc_detail = pd.DataFrame({
-                    '因子':_names,
-                    'Shift Min':_opt['shift_min'],
-                    'Shift Max':_opt['shift_max'],
-                    'Shift 中點':_opt['shift_mid'],
-                    '理論補償中心':-_opt['shift_mid'],
-                    'LAB 實測 Min':_opt['observed_lo'],
-                    'LAB 實測 Max':_opt['observed_hi'],
-                    '採用中心 C':_opt['center'],
-                    '擴展係數 t':np.repeat(float(_opt['scale']),3),
-                    '建議 LCL':_b_lo,
-                    '建議 UCL':_b_hi,
-                })
-                _backcalc_formula = pd.DataFrame([
-                    {
-                        '因子':_names[i],
-                        '補償中心公式':f'C = CLIP(−({sm:.2f} + {sx:.2f})/2, {aa:.2f}, {bb:.2f}) = {cc:.2f}',
-                        'LCL 代入公式':f'{cc:.2f} + {float(_opt["scale"]):.2f} × ({aa:.2f} − {cc:.2f}) ≈ {_b_lo[i]:.2f}',
-                        'UCL 代入公式':f'{cc:.2f} + {float(_opt["scale"]):.2f} × ({bb:.2f} − {cc:.2f}) ≈ {_b_hi[i]:.2f}',
-                    }
-                    for i,(sm,sx,aa,bb,cc) in enumerate(zip(
-                        _opt['shift_min'],_opt['shift_max'],
-                        _opt['observed_lo'],_opt['observed_hi'],_opt['center']))
-                ])
-                st.markdown('**計算過程｜由 Shift 推導建議 LCL/UCL**')
-                st.dataframe(_backcalc_detail.style.format(precision=2),
-                             use_container_width=True,hide_index=True)
-                st.markdown('**逐項公式代入（ΔL*、Δa*、Δb*）**')
-                st.dataframe(_backcalc_formula,use_container_width=True,hide_index=True)
-                st.latex(r'C_j=\operatorname{clip}\left(-\frac{S_{j,min}+S_{j,max}}{2},\ LAB_{j,min},\ LAB_{j,max}\right)')
-                st.latex(r'LCL_j=C_j+t(LAB_{j,min}-C_j)\qquad UCL_j=C_j+t(LAB_{j,max}-C_j)')
-                st.caption('t 由 0～1 二分搜尋最大可行值，須同時滿足 LAB ΔE* 上限與 LINE 在歷史 Shift Min/Max 組合下的保守上界；'
-                           '計算使用未四捨五入數據，公式代入僅顯示兩位小數，故手算結果可能有尾數差異。')
                 _stress_proposed,_worst_proposed_case=task3_stress_audit(
                     _b_lo,_b_hi,_valid_paired,line_de_target)
                 if _worst_proposed_case is not None:
@@ -2345,7 +2306,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 st.caption(f'補償中心 = ({_opt["center"][0]:.2f}, {_opt["center"][1]:.2f}, {_opt["center"][2]:.2f})；'
                            f'擴展係數 t = {_opt["scale"]:.2f}。')
 
-            st.markdown('### 5.3 改善前後 LINE 品質風險驗證')
+            st.markdown('### 表二｜改善前後 LINE 品質驗證')
             _comparison = pd.DataFrame([
                 {'評估項目':'LINE 保守上界（Shift Min/Max）','原始 IQR':_current_envelope,'建議界限':_line_worst},
                 {'評估項目':'LINE ΔE* 規格','原始 IQR':line_de_target,'建議界限':line_de_target},
@@ -2385,25 +2346,62 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 st.latex(r'\Delta E^*_{LINE,upper}=\sqrt{\sum_j\max_{x\in\{LCL_j,UCL_j\},\,s\in\{S_{j,min},S_{j,max}\}}|x+s|^2}')
                 st.caption('界限判定使用未四捨五入值；畫面、Word 與 Excel 顯示兩位小數。')
 
+            # Trace tables share the exact same, unrounded numerical inputs with the optimiser.
+            # These are supplementary only; the management report has two main result tables.
+            _appendix_center = pd.DataFrame()
+            _appendix_limits = pd.DataFrame()
+            _appendix_t_checks = pd.DataFrame()
+            _appendix_corner_audit = pd.DataFrame()
+            if isinstance(_opt, dict) and 'scale' in _opt and _b_lo is not None:
+                _appendix_center = pd.DataFrame({
+                    '色差因子': _names,
+                    'Shift Min': _opt['shift_min'], 'Shift Max': _opt['shift_max'],
+                    '理論補償中心 = −(Min+Max)/2': -_opt['shift_mid'],
+                    'LAB 實測 Min': _opt['observed_lo'],
+                    'LAB 實測 Max': _opt['observed_hi'],
+                    '採用中心 C (限制於實測範圍)': _opt['center'],
+                })
+                _appendix_limits = pd.DataFrame({
+                    '色差因子': _names, '中心 C': _opt['center'],
+                    'LAB 實測 Min': _opt['observed_lo'],
+                    'LAB 實測 Max': _opt['observed_hi'],
+                    '擴展係數 t': [_opt['scale']]*3,
+                    '建議 LCL': _b_lo, '建議 UCL': _b_hi,
+                })
+                _trace_t = [0.0, float(_opt['scale']), 1.0]
+                _trace_rows=[]
+                for _trial_t in _trace_t:
+                    _trace_lo=_opt['center']+_trial_t*(_opt['observed_lo']-_opt['center'])
+                    _trace_hi=_opt['center']+_trial_t*(_opt['observed_hi']-_opt['center'])
+                    _trial_lab=float(np.linalg.norm(np.maximum(np.abs(_trace_lo),np.abs(_trace_hi))))
+                    _trial_line=task3_shift_envelope_peak(_trace_lo,_trace_hi,_opt['shift_min'],_opt['shift_max'])
+                    _trace_rows.append({'係數 t':_trial_t,'LAB ΔE* 最不利值':_trial_lab,
+                        'LINE ΔE* 最不利值':_trial_line,
+                        'LAB 判定':'符合' if _trial_lab<=lab_de_target+1e-10 else '超規',
+                        'LINE 判定':'符合' if _trial_line<=line_de_target+1e-10 else '超規'})
+                _appendix_t_checks=pd.DataFrame(_trace_rows)
+                _corners=[]
+                for _j, _factor in enumerate(_names):
+                    _c=float(_opt['center'][_j]); _t=float(_opt['scale'])
+                    _mn=float(_opt['observed_lo'][_j]); _mx=float(_opt['observed_hi'][_j])
+                    _corners.append({'因子':_factor,'LCL 代入式':f'{_c:.2f} + {_t:.2f} × ({_mn:.2f} − {_c:.2f})',
+                                     'LCL 計算結果':float(_b_lo[_j]),
+                                     'UCL 代入式':f'{_c:.2f} + {_t:.2f} × ({_mx:.2f} − {_c:.2f})',
+                                     'UCL 計算結果':float(_b_hi[_j])})
+                _appendix_corner_audit=pd.DataFrame(_corners)
+
             # Formula-level Excel audit with full numerical precision and 0.00 display.
             _excel_bytes = io.BytesIO()
             with pd.ExcelWriter(_excel_bytes, engine='openpyxl') as _writer:
                 _shift_range_table.to_excel(_writer, sheet_name='5_1_Shift_Range', index=False)
                 _risk_overview.to_excel(_writer, sheet_name='IQR_Risk', index=False)
                 _limits.to_excel(_writer, sheet_name='5_2_LAB_Limits', index=False)
-                _backcalc_detail.to_excel(_writer, sheet_name='5_2_Calculation', index=False)
-                _backcalc_formula.to_excel(_writer, sheet_name='5_2_Substitution', index=False)
-                # Live Excel formulas for checking the recommended limits.
-                _calc_ws = _writer.sheets['5_2_Calculation']
-                _calc_ws['L1'] = 'LCL Excel 驗算'
-                _calc_ws['M1'] = 'UCL Excel 驗算'
-                for _r in range(2, 2 + len(_backcalc_detail)):
-                    # F = observed LAB min, G = max, H = chosen center, I = scale t.
-                    _calc_ws[f'L{_r}'] = f'=H{_r}+I{_r}*(F{_r}-H{_r})'
-                    _calc_ws[f'M{_r}'] = f'=H{_r}+I{_r}*(G{_r}-H{_r})'
-                    _calc_ws[f'L{_r}'].number_format = '0.00'
-                    _calc_ws[f'M{_r}'].number_format = '0.00'
                 _comparison.to_excel(_writer, sheet_name='5_3_LINE_Compare', index=False)
+                if not _appendix_center.empty:
+                    _appendix_center.to_excel(_writer, sheet_name='Appendix_Center', index=False)
+                    _appendix_t_checks.to_excel(_writer, sheet_name='Appendix_t_Check', index=False)
+                    _appendix_limits.to_excel(_writer, sheet_name='Appendix_Limits', index=False)
+                    _appendix_corner_audit.to_excel(_writer, sheet_name='Appendix_Substitution', index=False)
                 _labs.to_excel(_writer, sheet_name='All_LAB', index=False)
                 _paired.to_excel(_writer, sheet_name='Paired_LAB_LINE', index=False)
                 _valid_paired.to_excel(_writer, sheet_name='Shift_Calibration', index=False)
@@ -2441,80 +2439,106 @@ elif app_mode == "🎛️ Control Limit Calculator":
         st.markdown("---")
         st.markdown("### 📄 Export Task 3 Word Report")
         st.caption(
-            "The Word report includes the paired LAB–LINE analysis, calculated incoming LAB limits, "
-            "correlation results, summary table, and the current ΔL* / Δa* / Δb* charts."
+            "The Word report contains two concise management tables and a traceable calculation appendix."
         )
 
         def build_task3_word_report():
-            """Short, report-ready section 5; trace calculations in Excel."""
-            doc=docx.Document()
-            sec=doc.sections[0]
-            sec.page_width=Mm(210); sec.page_height=Mm(297)
-            sec.top_margin=Mm(19); sec.bottom_margin=Mm(19)
-            sec.left_margin=Mm(18); sec.right_margin=Mm(18)
-            normal=doc.styles['Normal']
-            normal.font.name='Microsoft JhengHei'
-            normal.font.size=Pt(10)
-            doc.add_heading('5. LAB–LINE 產出風險驗證與管制界限改善',level=1)
-            doc.add_paragraph(f'色號：{color}；LAB ΔE* 規格 ≤ {lab_de_target:.2f}；LINE ΔE* 規格 ≤ {line_de_target:.2f}。')
+            """Two management tables and a short conclusion, with traceable appendices."""
+            doc = docx.Document()
+            sec = doc.sections[0]
+            sec.page_width = Mm(210); sec.page_height = Mm(297)
+            sec.top_margin = Mm(19); sec.bottom_margin = Mm(19)
+            sec.left_margin = Mm(18); sec.right_margin = Mm(18)
+            normal = doc.styles['Normal']
+            normal.font.name = 'Microsoft JhengHei'
+            normal.font.size = Pt(10)
 
-            def add_table(frame,cols=None):
+            def add_table(frame, cols=None):
                 if frame is None or frame.empty:
-                    doc.add_paragraph('目前無足夠數據。')
+                    doc.add_paragraph('本色號資料不足，無法提供有效計算結果。')
                     return
-                cols=cols or list(frame.columns)
-                tb=doc.add_table(rows=1,cols=len(cols));tb.style='Table Grid'
-                for k,v in enumerate(cols):tb.rows[0].cells[k].text=str(v)
-                for _,r in frame.iterrows():
-                    cells=tb.add_row().cells
-                    for k,col in enumerate(cols):
-                        val=r[col]
-                        cells[k].text=(f'{float(val):.2f}' if isinstance(val,(float,np.floating)) and np.isfinite(val)
-                                       else ('—' if pd.isna(val) else str(val)))
+                cols = list(cols or frame.columns)
+                table = doc.add_table(rows=1, cols=len(cols))
+                table.style = 'Table Grid'
+                for k, column in enumerate(cols):
+                    table.rows[0].cells[k].text = str(column)
+                for _, record in frame.iterrows():
+                    cells = table.add_row().cells
+                    for k, column in enumerate(cols):
+                        value = record[column]
+                        if isinstance(value, (int, np.integer)) and not isinstance(value, bool):
+                            cells[k].text = str(int(value))
+                        elif isinstance(value, (float, np.floating)):
+                            cells[k].text = f'{float(value):.2f}' if np.isfinite(value) else '—'
+                        else:
+                            cells[k].text = '—' if pd.isna(value) else str(value)
                 doc.add_paragraph('')
 
-            doc.add_heading('5.1 LAB–LINE 歷史 Shift 變動分析',level=2)
-            doc.add_paragraph('以同一製造批號之實測值計算 Shift = LINE − LAB；列出三項色差因子之歷史最小值與最大值。')
-            add_table(_shift_range_table)
-            doc.add_heading('5.2 依 Shift 反推 LAB 建議管制界限',level=2)
+            doc.add_heading('5. LAB 入料管制界限初步建議與 LINE 品質驗證', level=1)
+            doc.add_paragraph(f'塗料編號：{color}；LAB ΔE* 規格 ≤ {lab_de_target:.2f}；'
+                              f'LINE ΔE* 規格 ≤ {line_de_target:.2f}。')
+            doc.add_paragraph('本研究以原始 IQR 為統計參考，並依歷史 LAB–LINE 色差偏移，'
+                              '初步建立三項入料色差管制範圍；詳細計算及資料來源列於附錄。')
+            doc.add_paragraph('表｜LAB 初步建議管制界限')
             add_table(_limits)
-            if not _backcalc_detail.empty:
-                doc.add_paragraph('表｜由歷史 Shift 至 LAB 建議界限之逐項計算')
-                add_table(_backcalc_detail, ['因子','Shift Min','Shift Max','LAB 實測 Min',
-                                             'LAB 實測 Max','採用中心 C','擴展係數 t','建議 LCL','建議 UCL'])
-                doc.add_paragraph('C = CLIP[−(Shift Min + Shift Max) / 2, LAB 實測 Min, LAB 實測 Max]；'
-                                  'LCL = C + t × (LAB 實測 Min − C)；'
-                                  'UCL = C + t × (LAB 實測 Max − C)。')
-                doc.add_paragraph('各因子代入公式（顯示小數二位，實際運算保留原始精度）：')
-                for _, row in _backcalc_formula.iterrows():
-                    doc.add_paragraph(f'{row["因子"]}：{row["補償中心公式"]}',style='Normal')
-                    doc.add_paragraph(f'   LCL：{row["LCL 代入公式"]}',style='Normal')
-                    doc.add_paragraph(f'   UCL：{row["UCL 代入公式"]}',style='Normal')
-            doc.add_paragraph('計算：補償中心 = −(Shift Min + Shift Max)/2，限制於歷史合格 LAB 實測範圍。'
-                              '從中心向 LAB 歷史範圍擴展，利用二分搜尋最大係數 t，使 LAB ΔE* 與 LINE Shift 保守上界均符合規格。')
-            if _b_lo is not None and isinstance(_opt,dict) and 'scale' in _opt:
-                doc.add_paragraph(f'補償中心：('+', '.join(f'{v:.2f}' for v in _opt['center'])+
-                                  f')；擴展係數 t = {_opt["scale"]:.2f}。')
-            doc.add_heading('5.3 改善前後 LINE 品質風險驗證',level=2)
+            doc.add_paragraph('表｜改善前後 LINE 品質驗證')
             add_table(_comparison)
-            doc.add_paragraph('LINE 保守上界 = SQRT[ Σ_j MAX(|LAB LCL_j + Shift Min_j|, '
-                              '|LAB LCL_j + Shift Max_j|, |LAB UCL_j + Shift Min_j|, '
-                              '|LAB UCL_j + Shift Max_j|)² ]。')
-            doc.add_paragraph('結論：'+(_conclusion or '無法評估。'))
-            doc.add_paragraph('註：採用 Shift 各因子的歷史 Min / Max 獨立組合進行保守壓力測試；'
-                              '不代表所有組合實際發生，也不保證未來 LINE 零超規。'
-                              '所有判定使用未四捨五入數值，報告僅顯示小數二位。')
+            doc.add_paragraph('結論：' + (_conclusion or '目前資料不足，無法提出初步界限。'))
+            doc.add_paragraph('註：上述結果為歷史 Shift Min/Max 情境下的初步建議，'
+                              '並非已證實之最適界限，亦不代表未來 LINE 零超規。'
+                              '所有判定採用未四捨五入數值，表列僅顯示小數點後二位。')
+
+            doc.add_page_break()
+            doc.add_heading('附錄｜LAB 建議管制界限計算依據', level=1)
+            doc.add_heading('A1. 歷史 LAB–LINE Shift 來源', level=2)
+            doc.add_paragraph('資料單位：同一製造批號之 LAB 與 LINE 三項色差完整配對；'
+                              'Shift = LINE 實測值 − LAB 實測值。'
+                              'Shift 估計使用 LAB ΔE* 符合本色號規格之有效配對批次，未排除 LINE NG。')
+            if not _valid_paired.empty:
+                _raw_cols = ['製造批號'] + _lab_keys + [f'LINE_{f}' for f in _factors] + _shift_keys
+                add_table(_valid_paired[_raw_cols])
+            else:
+                doc.add_paragraph('無完整有效配對批次。')
+            doc.add_heading('A2. Shift 變動與補償中心', level=2)
+            doc.add_paragraph('Shift Min = MIN(各批 Shift)；Shift Max = MAX(各批 Shift)；'
+                              '理論中心 = −(Shift Min + Shift Max) / 2；'
+                              '採用中心 C = MIN(MAX(理論中心, LAB 實測 Min), LAB 實測 Max)。')
+            add_table(_appendix_center)
+
+            doc.add_heading('A3. 擴展係數 t 之確認', level=2)
+            doc.add_paragraph('從中心 C 向合格 LAB 實測 Min/Max 延伸：'
+                              'LCL(t) = C + t × (LAB Min − C)；'
+                              'UCL(t) = C + t × (LAB Max − C)，0 ≤ t ≤ 1。'
+                              '二分搜尋最大可行 t，須同時滿足 LAB ΔE* 及 LINE ΔE* 規格。')
+            doc.add_paragraph('LAB 最不利值 = SQRT[Σ MAX(|LCL|, |UCL|)²]。')
+            doc.add_paragraph('LINE 保守最不利值 = SQRT[Σ MAX(|LCL+Shift Min|, |LCL+Shift Max|, '
+                              '|UCL+Shift Min|, |UCL+Shift Max|)²]。')
+            add_table(_appendix_t_checks)
+            if isinstance(_opt, dict) and 'scale' in _opt:
+                doc.add_paragraph(f'採用擴展係數 t = {_opt["scale"]:.2f}。'
+                                  ' t = 0 及 t = 1 是端點查核；本表不代表二分搜尋每次迭代紀錄。')
+
+            doc.add_heading('A4. LAB 三因子建議 LCL / UCL 逐項代入', level=2)
+            add_table(_appendix_corner_audit)
+            doc.add_paragraph('上述代入式以兩位小數顯示，計算以未四捨五入之實際數值為準，'
+                              '因此顯示數字直接重算可能有末位差異。')
+
+            doc.add_heading('A5. LINE 最不利情境確認', level=2)
+            add_table(_comparison)
+            doc.add_paragraph('LINE 規格餘裕 = LINE ΔE* 規格 − LINE 保守最不利值。'
+                              '保守情境將三因子 Shift 的觀測極值獨立組合，'
+                              '可能包含歷史上未曾同時出現的組合。')
             if _case_audit is not None:
-                doc.add_heading('附錄｜實際配對 Shift 核算範例',level=2)
-                doc.add_paragraph('歷史配對最不利來源批號：'+str(_case_audit['batch'])+
-                                  '。此例僅驗證同批 Shift，不等於上表的 Min/Max 獨立保守上界。')
-                add_table(_case_audit['source'],['色差因子','來源 LAB 實測值','來源 LINE 實測值','Shift = LINE − LAB'])
-                add_table(_case_audit['prediction'],['色差因子','候選 LAB 最不利點 (A)','來源 Shift (B)','LINE 預測值 (A+B)'])
-            out=io.BytesIO();doc.save(out);return out.getvalue()
+                doc.add_paragraph('同批 Shift 核對範例（供追溯，與 Min/Max 獨立組合之保守上界不同）：'
+                                  + str(_case_audit['batch']))
+                add_table(_case_audit['source'])
+                add_table(_case_audit['prediction'])
+            doc.add_paragraph('後續需累積更多實際生產數據，再評估界限之適用性與 LINE 產出品質風險。')
+            buffer = io.BytesIO(); doc.save(buffer); return buffer.getvalue()
 
         safe_color_name = re.sub(r"[^A-Za-z0-9_-]+", "_", str(color))
         report_state_key = "task3_export_payload"
-        report_identity = ("SIMPLE_SHIFT_BACKCALC_FORMULA_V2", uploaded_data_file.name, uploaded_data_file.size,
+        report_identity = ("SIMPLE_SHIFT_MAIN_APPENDIX_V2", uploaded_data_file.name, uploaded_data_file.size,
                            uploaded_limit_file.name, uploaded_limit_file.size,
                            str(color), tuple(selected_years), tuple(selected_months),
                            float(lab_de_target), float(line_de_target))
@@ -2523,16 +2547,6 @@ elif app_mode == "🎛️ Control Limit Calculator":
             st.session_state["task3_export_identity"] = report_identity
         if st.button("📄 Prepare Word Report", key="task3_prepare_word"):
             with st.spinner("Generating high-resolution report charts and Word file..."):
-                for _factor in factors:
-                    if _factor in calc_res:
-                        _pair = calc_res[_factor]["pair"]
-                        if _pair is not None and not _pair.empty:
-                            _report_fig = build_task3_report_chart(_pair, _factor)
-                            _report_buf = io.BytesIO()
-                            _report_fig.savefig(_report_buf, format="png", dpi=500,
-                                                bbox_inches="tight", facecolor="white", pad_inches=0.04)
-                            report_chart_buffers[_factor] = _report_buf.getvalue()
-                            plt.close(_report_fig)
                 st.session_state[report_state_key] = build_task3_word_report()
         if st.session_state.get(report_state_key):
             st.download_button(
