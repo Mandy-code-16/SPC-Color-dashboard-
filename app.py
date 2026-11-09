@@ -2601,6 +2601,39 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 with st.expander('查看完整計算明細（單一表格）', expanded=True):
                     st.dataframe(task3_format_calculation_table(_appendix_one_table),
                                  use_container_width=True, hide_index=True)
+                    # Download ONLY this calculation table, directly beneath its display.
+                    # Export unrounded numeric cells; Excel shows numbers to 2 decimals.
+                    _single_table_buffer = io.BytesIO()
+                    with pd.ExcelWriter(_single_table_buffer, engine='openpyxl') as _single_writer:
+                        _appendix_one_table.to_excel(
+                            _single_writer, sheet_name='LAB_Initial_Limits_Calculation', index=False
+                        )
+                        _single_sheet = _single_writer.sheets['LAB_Initial_Limits_Calculation']
+                        _single_sheet.freeze_panes = 'C2'
+                        _single_sheet.auto_filter.ref = _single_sheet.dimensions
+                        _single_sheet.column_dimensions['A'].width = 27
+                        _single_sheet.column_dimensions['B'].width = 67
+                        for _col in ('C', 'D', 'E'):
+                            _single_sheet.column_dimensions[_col].width = 30
+                        for _cell in _single_sheet[1]:
+                            _cell.font = __import__('openpyxl').styles.Font(
+                                name='Microsoft JhengHei', bold=True, color='FFFFFF'
+                            )
+                            _cell.fill = __import__('openpyxl').styles.PatternFill(
+                                'solid', fgColor='24476A'
+                            )
+                        for _row in _single_sheet.iter_rows(min_row=2, min_col=3, max_col=5):
+                            for _cell in _row:
+                                if isinstance(_cell.value, (int, float)) and not isinstance(_cell.value, bool):
+                                    _cell.number_format = '0.00'
+                    _safe_table_color = re.sub(r'[^A-Za-z0-9_-]+', '_', str(color))
+                    st.download_button(
+                        '📥 下載本表 Excel（含公式說明）',
+                        data=_single_table_buffer.getvalue(),
+                        file_name=f'{_safe_table_color}_LAB_Initial_Limits_Calculation.xlsx',
+                        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                        key='task3_single_calc_table_download',
+                    )
                     st.caption('t 由二分搜尋選取：LAB 與 LINE 最不利 ΔE* 均須符合本色號規格；'
                                'LINE 採三項 Shift Min/Max 獨立組合之保守上界。'
                                '代入式顯示兩位小數，實際結果及風險判定以未四捨五入值計算。')
