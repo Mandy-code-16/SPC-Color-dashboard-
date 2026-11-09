@@ -960,6 +960,56 @@ def task3_shift_summary(shift_df):
     return pd.DataFrame(rows)
 
 
+def task3_one_table_calculation(opt, lab_spec, line_spec):
+    """Single auditable table for appendix, app, Word and Excel.
+
+    Retain full precision for results; only substitution text uses two decimals.
+    """
+    if not isinstance(opt, dict) or 'scale' not in opt:
+        return pd.DataFrame()
+    names = ('ΔL*', 'Δa*', 'Δb*')
+    shift_lo = np.asarray(opt['shift_min'], float)
+    shift_hi = np.asarray(opt['shift_max'], float)
+    lab_lo = np.asarray(opt['observed_lo'], float)
+    lab_hi = np.asarray(opt['observed_hi'], float)
+    center = np.asarray(opt['center'], float)
+    theory = -(shift_lo + shift_hi) / 2
+    scale = float(opt['scale'])
+    candidate_lo = np.asarray(opt['lo'], float)
+    candidate_hi = np.asarray(opt['hi'], float)
+    def row(name, formula, vals):
+        return {'計算項目': name, '適用公式': formula,
+                **{k: vals[i] for i, k in enumerate(names)}}
+    def substitutions(is_lower):
+        end = lab_lo if is_lower else lab_hi
+        return [f'{center[i]:.2f} + {scale:.2f} × ({end[i]:.2f} − ({center[i]:.2f}))' for i in range(3)]
+    result = [
+        row('Shift 最小值', 'MIN(同批 LINE − LAB)', shift_lo),
+        row('Shift 最大值', 'MAX(同批 LINE − LAB)', shift_hi),
+        row('理論補償中心', '−(Shift Min + Shift Max) / 2', theory),
+        row('LAB 合格實測最小值', 'MIN(LAB ΔE* 合格且完整配對批次)', lab_lo),
+        row('LAB 合格實測最大值', 'MAX(LAB ΔE* 合格且完整配對批次)', lab_hi),
+        row('採用補償中心 C', 'MAX(LAB Min, MIN(理論中心, LAB Max))', center),
+        row('擴展係數 t', f'MAX t∈[0,1]：LAB ΔE* ≤ {lab_spec:.2f}、LINE ΔE* ≤ {line_spec:.2f}', [scale]*3),
+        row('LCL 代入計算', 'C + t × (LAB Min − C)', substitutions(True)),
+        row('初步建議 LCL', '未四捨五入計算結果', candidate_lo),
+        row('UCL 代入計算', 'C + t × (LAB Max − C)', substitutions(False)),
+        row('初步建議 UCL', '未四捨五入計算結果', candidate_hi),
+    ]
+    return pd.DataFrame(result, columns=['計算項目','適用公式',*names])
+
+
+def task3_format_calculation_table(frame):
+    """For Streamlit only: numeric results 0.00, text substitutions unchanged."""
+    out = frame.copy()
+    for col in ('ΔL*', 'Δa*', 'Δb*'):
+        out[col] = out[col].map(
+            lambda x: f'{float(x):.2f}' if isinstance(x, (int, float, np.number))
+            and np.isfinite(x) else str(x)
+        )
+    return out
+
+
 # =========================================================
 # VIEW 1: MAIN DASHBOARD
 # =========================================================
@@ -2502,11 +2552,13 @@ elif app_mode == "🎛️ Control Limit Calculator":
 
             # Trace tables share the exact same, unrounded numerical inputs with the optimiser.
             # These are supplementary only; the management report has two main result tables.
+            _appendix_one_table = pd.DataFrame()
             _appendix_center = pd.DataFrame()
             _appendix_limits = pd.DataFrame()
             _appendix_t_checks = pd.DataFrame()
             _appendix_corner_audit = pd.DataFrame()
             if isinstance(_opt, dict) and 'scale' in _opt and _b_lo is not None:
+                _appendix_one_table = task3_one_table_calculation(_opt, lab_de_target, line_de_target)
                 _appendix_center = pd.DataFrame({
                     '色差因子': _names,
                     'Shift Min': _opt['shift_min'], 'Shift Max': _opt['shift_max'],
@@ -2544,6 +2596,21 @@ elif app_mode == "🎛️ Control Limit Calculator":
                                      'UCL 計算結果':float(_b_hi[_j])})
                 _appendix_corner_audit=pd.DataFrame(_corners)
 
+            st.markdown('### 附錄｜LAB 初步建議管制界限計算明細')
+            if not _appendix_one_table.empty:
+                with st.expander('查看完整計算明細（單一表格）', expanded=True):
+                    st.dataframe(task3_format_calculation_table(_appendix_one_table),
+                                 use_container_width=True, hide_index=True)
+                    st.caption('t 由二分搜尋選取：LAB 與 LINE 最不利 ΔE* 均須符合本色號規格；'
+                               'LINE 採三項 Shift Min/Max 獨立組合之保守上界。'
+                               '代入式顯示兩位小數，實際結果及風險判定以未四捨五入值計算。')
+                    if not _appendix_t_checks.empty:
+                        st.markdown('**t 之規格驗證（t = 0、採用 t、t = 1）**')
+                        st.dataframe(_appendix_t_checks.style.format(precision=2),
+                                     use_container_width=True, hide_index=True)
+            else:
+                st.info('配對數據不足或未能找到可行界限，因此不顯示計算明細。')
+
             # Formula-level Excel audit with full numerical precision and 0.00 display.
             _excel_bytes = io.BytesIO()
             with pd.ExcelWriter(_excel_bytes, engine='openpyxl') as _writer:
@@ -2553,6 +2620,8 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 _limits.to_excel(_writer, sheet_name='5_2_LAB_Limits', index=False)
                 _comparison.to_excel(_writer, sheet_name='5_2_LINE_Verify', index=False)
                 _followup.to_excel(_writer, sheet_name='5_3_Followup', index=False)
+                if not _appendix_one_table.empty:
+                    _appendix_one_table.to_excel(_writer, sheet_name='Appendix_One_Table', index=False)
                 if not _appendix_center.empty:
                     _appendix_center.to_excel(_writer, sheet_name='Appendix_Center', index=False)
                     _appendix_t_checks.to_excel(_writer, sheet_name='Appendix_t_Check', index=False)
@@ -2920,29 +2989,18 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 add_table(_valid_paired[_raw_cols])
             else:
                 doc.add_paragraph('無完整有效配對批次。')
-            doc.add_heading('A2. Shift 變動與補償中心', level=2)
-            doc.add_paragraph('Shift Min = MIN(各批 Shift)；Shift Max = MAX(各批 Shift)；'
-                              '理論中心 = −(Shift Min + Shift Max) / 2；'
-                              '採用中心 C = MIN(MAX(理論中心, LAB 實測 Min), LAB 實測 Max)。')
-            add_table(_appendix_center)
-
-            doc.add_heading('A3. 擴展係數 t 之確認', level=2)
-            doc.add_paragraph('從中心 C 向合格 LAB 實測 Min/Max 延伸：'
-                              'LCL(t) = C + t × (LAB Min − C)；'
-                              'UCL(t) = C + t × (LAB Max − C)，0 ≤ t ≤ 1。'
-                              '二分搜尋最大可行 t，須同時滿足 LAB ΔE* 及 LINE ΔE* 規格。')
-            doc.add_paragraph('LAB 最不利值 = SQRT[Σ MAX(|LCL|, |UCL|)²]。')
-            doc.add_paragraph('LINE 保守最不利值 = SQRT[Σ MAX(|LCL+Shift Min|, |LCL+Shift Max|, '
+            doc.add_heading('A2. LAB 初步建議管制界限計算明細（單一表格）', level=2)
+            doc.add_paragraph('下表依序呈現 Shift 最小／最大值、LAB 合格實測範圍、補償中心 C、擴展係數 t、'
+                              'LCL/UCL 逐項代入及初步建議結果。各色差因子使用同一擴展係數 t。')
+            add_table(_appendix_one_table)
+            doc.add_paragraph('t 由二分搜尋選取，須同時符合 LAB ΔE* 與 LINE ΔE* 規格。'
+                              'LAB 上界 = SQRT[Σ MAX(|LCL|, |UCL|)²]；'
+                              'LINE 保守上界 = SQRT[Σ MAX(|LCL+Shift Min|, |LCL+Shift Max|, '
                               '|UCL+Shift Min|, |UCL+Shift Max|)²]。')
+            doc.add_heading('A3. 擴展係數 t 之規格核對', level=2)
             add_table(_appendix_t_checks)
-            if isinstance(_opt, dict) and 'scale' in _opt:
-                doc.add_paragraph(f'採用擴展係數 t = {_opt["scale"]:.2f}。'
-                                  ' t = 0 及 t = 1 是端點查核；本表不代表二分搜尋每次迭代紀錄。')
-
-            doc.add_heading('A4. LAB 三因子建議 LCL / UCL 逐項代入', level=2)
-            add_table(_appendix_corner_audit)
-            doc.add_paragraph('上述代入式以兩位小數顯示，計算以未四捨五入之實際數值為準，'
-                              '因此顯示數字直接重算可能有末位差異。')
+            doc.add_paragraph('表內 t=0、選定 t、t=1 為代表性核對點，非逐次二分搜尋紀錄。'
+                              '計算採未四捨五入精度，公式代入式及表列顯示兩位小數，尾數可能略有差異。')
 
             doc.add_heading('A5. LINE 最不利情境確認', level=2)
             doc.add_paragraph('比較基準為使用者人工確認之 LAB 三因子初始界限，而非自動計算的 IQR 界限。')
