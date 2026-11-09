@@ -788,7 +788,7 @@ def task3_shift_envelope_peak(lo, hi, shift_min, shift_max):
 
 
 def task3_iqr_risk_table(iqr_lo, iqr_hi, shift_min, shift_max, lab_spec, line_spec):
-    """Independently audit ORIGINAL IQR bounds, never the manually confirmed box.
+    """Audit the user-confirmed starting LAB bounds (not necessarily raw IQR).
 
     All calculations retain full precision. Marginal Shift extrema are taken from
     all complete paired batches meeting incoming LAB ΔE* acceptance, including
@@ -800,10 +800,10 @@ def task3_iqr_risk_table(iqr_lo, iqr_hi, shift_min, shift_max, lab_spec, line_sp
     line_peak = task3_shift_envelope_peak(low, high, low_shift, high_shift)
     margin = float(line_spec - line_peak)
     rows = [
-        {'評估項目':'LAB ΔE* 最不利值', '計算方式':'√Σ max(|IQR LCL|, |IQR UCL|)²',
+        {'評估項目':'LAB ΔE* 最不利值', '計算方式':'√Σ max(|確認 LCL|, |確認 UCL|)²',
          '規格':f'≤ {lab_spec:.2f}', '驗證結果':lab_peak,
          '判定':'符合' if lab_peak <= lab_spec + 1e-10 else '不符合'},
-        {'評估項目':'LINE ΔE* 最不利預測值', '計算方式':'√Σ max(|IQR 界限 + Shift Min/Max|)²',
+        {'評估項目':'LINE ΔE* 最不利預測值', '計算方式':'√Σ max(|確認界限 + Shift Min/Max|)²',
          '規格':f'≤ {line_spec:.2f}', '驗證結果':line_peak,
          '判定':'具超規風險' if line_peak > line_spec + 1e-10 else '符合歷史情境'},
         {'評估項目':'LINE 規格餘裕', '計算方式':'LINE ΔE* 規格 − 預測 LINE ΔE*',
@@ -2443,10 +2443,19 @@ elif app_mode == "🎛️ Control Limit Calculator":
             _valid_paired = _paired.loc[_paired['LAB 規格合格']].copy()
             _shift_stats = task3_shift_summary(_valid_paired)
             _shift_matrix = _valid_paired[_shift_keys].to_numpy(float)
-            _iqr_lo = np.array([calc_res[f]['iqr_lcl'] for f in _factors], dtype=float)
-            _iqr_hi = np.array([calc_res[f]['iqr_ucl'] for f in _factors], dtype=float)
+            # Preserve automatic IQR as a statistical reference ONLY.  The user-
+            # confirmed editable limits are the authoritative starting limits
+            # throughout sections 1.1 / 1.3 / 1.4 and their exports.
+            _raw_iqr_lo = np.array([calc_res[f]['iqr_lcl'] for f in _factors], dtype=float)
+            _raw_iqr_hi = np.array([calc_res[f]['iqr_ucl'] for f in _factors], dtype=float)
+            _iqr_lo = _lo.copy()
+            _iqr_hi = _hi.copy()
             _iqr_limits_table = pd.DataFrame({
-                '色差因子': _names, '原始 IQR LCL': _iqr_lo, '原始 IQR UCL': _iqr_hi,
+                '色差因子': _names, '人工確認 LCL': _iqr_lo, '人工確認 UCL': _iqr_hi,
+            })
+            _raw_iqr_limits_table = pd.DataFrame({
+                '色差因子': _names, '原始 IQR LCL（參考）': _raw_iqr_lo,
+                '原始 IQR UCL（參考）': _raw_iqr_hi,
             })
             _iqr_line_peak = float('nan')
             _iqr_lab_peak = float(np.linalg.norm(np.maximum(np.abs(_iqr_lo),np.abs(_iqr_hi))))
@@ -2461,15 +2470,18 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 _iqr_start_label = ('LAB 規格不符' if _iqr_lab_peak > lab_de_target + 1e-10
                                     else 'LINE 潛在超規' if _iqr_line_peak > line_de_target + 1e-10
                                     else '符合歷史情境，仍待驗證')
-            st.markdown('### 1.1｜原始 IQR 管制界限之品質風險驗證')
-            st.caption('此步驟僅使用原始 IQR 統計 LCL/UCL（不是人工確認界限）。'
-                       'LINE 最不利值採歷史 Shift Min/Max 獨立組合，屬保守壓力測試。')
+            st.markdown('### 1.1｜人工確認初始界限之品質風險驗證')
+            st.caption('本步驟使用上方 ✏️ Recommended LAB LCL/UCL 人工確認值，不使用原始 IQR 自動結果。'
+                       '原始 IQR 保留作統計參考；LINE 最不利值採歷史 Shift Min/Max 獨立組合。')
             if not _iqr_verification.empty:
                 _iqr_display = _iqr_verification.copy()
                 _iqr_display['驗證結果'] = _iqr_display['驗證結果'].map(lambda v: f'{v:.2f}')
                 st.dataframe(_iqr_display, use_container_width=True, hide_index=True)
-                with st.expander('查看原始 IQR 界限與逐因子 LINE 極值', expanded=False):
+                with st.expander('查看人工確認界限、原始 IQR 參考與逐因子 LINE 極值', expanded=False):
+                    st.markdown('**本次風險驗證採用之人工確認界限**')
                     st.dataframe(_iqr_limits_table.style.format(precision=3), use_container_width=True, hide_index=True)
+                    st.markdown('**原始 IQR 統計結果（僅供參考）**')
+                    st.dataframe(_raw_iqr_limits_table.style.format(precision=3), use_container_width=True, hide_index=True)
                     _shift_low, _shift_high = _shift_matrix.min(axis=0), _shift_matrix.max(axis=0)
                     _extreme_audit = pd.DataFrame({
                         '色差因子': _names,
@@ -2480,8 +2492,9 @@ elif app_mode == "🎛️ Control Limit Calculator":
                     st.dataframe(_extreme_audit.style.format(precision=3), use_container_width=True, hide_index=True)
                 _iqr_file = io.BytesIO()
                 with pd.ExcelWriter(_iqr_file, engine='openpyxl') as _iqr_writer:
-                    _iqr_verification.to_excel(_iqr_writer, sheet_name='IQR_Risk_Verification', index=False)
-                    _iqr_limits_table.to_excel(_iqr_writer, sheet_name='Original_IQR_Limits', index=False)
+                    _iqr_verification.to_excel(_iqr_writer, sheet_name='Confirmed_Risk_Verification', index=False)
+                    _iqr_limits_table.to_excel(_iqr_writer, sheet_name='Used_Confirmed_Limits', index=False)
+                    _raw_iqr_limits_table.to_excel(_iqr_writer, sheet_name='Original_IQR_Reference', index=False)
                     _extreme_audit.to_excel(_iqr_writer, sheet_name='LINE_Component_Extremes', index=False)
                     for _ws in _iqr_writer.book.worksheets:
                         _ws.freeze_panes = 'A2'
@@ -2491,18 +2504,18 @@ elif app_mode == "🎛️ Control Limit Calculator":
                             for _cell in _row:
                                 if isinstance(_cell.value,(float,np.floating)):
                                     _cell.number_format='0.000'
-                st.download_button('📥 下載原始 IQR 品質風險驗證 Excel', _iqr_file.getvalue(),
-                    file_name=f'{re.sub(r"[^A-Za-z0-9_-]+","_",str(color))}_Original_IQR_Risk.xlsx',
+                st.download_button('📥 下載人工確認界限品質風險驗證 Excel', _iqr_file.getvalue(),
+                    file_name=f'{re.sub(r"[^A-Za-z0-9_-]+","_",str(color))}_Confirmed_Limits_Risk.xlsx',
                     mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                    key='task3_download_original_iqr_risk')
-                if _iqr_line_peak > line_de_target + 1e-10:
-                    st.warning(f'原始 IQR 最不利 LINE ΔE* = {_iqr_line_peak:.2f}，高於規格 {line_de_target:.2f}；需要評估界限調整。')
-                elif _iqr_lab_peak > lab_de_target + 1e-10:
-                    st.warning('原始 IQR 三因子範圍不能滿足 LAB ΔE* 規格，需評估界限調整。')
+                    key='task3_download_confirmed_limits_risk')
+                if _iqr_lab_peak > lab_de_target + 1e-10:
+                    st.warning('人工確認界限之三因子最不利組合不符合 LAB ΔE* 規格，需評估調整。')
+                elif _iqr_line_peak > line_de_target + 1e-10:
+                    st.warning(f'人工確認界限 LINE 最不利 ΔE* = {_iqr_line_peak:.2f}，高於規格 {line_de_target:.2f}；需評估調整。')
                 else:
-                    st.info('原始 IQR 在目前歷史 Shift Min/Max 壓力測試下符合 LAB 與 LINE 規格；無須僅為通過本模型而強制調整。')
+                    st.info('人工確認界限在歷史 Shift Min/Max 壓力測試下符合 LAB 與 LINE 規格；無須僅為通過本模型而強制調整。')
             else:
-                st.warning('LAB 合格且完整配對之歷史 Shift 不足，無法核對原始 IQR 的 LINE 風險。')
+                st.warning('LAB 合格且完整配對之歷史 Shift 不足，無法核對人工確認界限的 LINE 風險。')
 
             # REPORT-READY THREE STEPS: Shift range -> backwards LAB bounds -> LINE check.
             _shift_min = _shift_matrix.min(axis=0) if len(_shift_matrix) else None
@@ -2536,7 +2549,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
             _opt = task3_line_risk_box(_valid_paired[_lab_keys].to_numpy(float),
                                        _shift_matrix, lab_de_target, line_de_target)
             if _iqr_lab_peak <= lab_de_target + 1e-10 and np.isfinite(_iqr_line_peak) and _iqr_line_peak <= line_de_target + 1e-10:
-                st.info('原始 IQR 已符合本次保守驗證，以下僅提供研究用之替代候選，不代表必須改變 IQR 管制界限。')
+                st.info('人工確認初始界限已符合本次保守驗證，以下僅提供研究用之替代候選，不代表必須改變人工確認界限。')
             if 'error' in _opt:
                 st.warning(_opt['error'])
                 st.caption('無法確認候選界限時，不以虛構數值取代。')
@@ -2688,21 +2701,21 @@ elif app_mode == "🎛️ Control Limit Calculator":
                     lambda v: f'{float(v):.2f}' if isinstance(v,(int,float,np.number)) and np.isfinite(v) else ('—' if isinstance(v,(int,float,np.number)) else str(v))
                 )
             _iqr_comparison = pd.DataFrame([
-                {'評估項目':'LAB ΔE* 最不利值', '原始 IQR 界限':_iqr_lab_peak, '初步建議界限':_proposed_lab_peak},
-                {'評估項目':'LINE ΔE* 最不利預測值', '原始 IQR 界限':_iqr_line_peak, '初步建議界限':_line_worst},
-                {'評估項目':'LINE ΔE* 規格', '原始 IQR 界限':line_de_target, '初步建議界限':line_de_target},
-                {'評估項目':'LINE 規格餘裕', '原始 IQR 界限':_iqr_margin, '初步建議界限':_proposed_margin},
-                {'評估項目':'風險判定', '原始 IQR 界限':_iqr_start_label, '初步建議界限':_proposed_risk},
+                {'評估項目':'LAB ΔE* 最不利值', '人工確認初始界限':_iqr_lab_peak, '初步建議界限':_proposed_lab_peak},
+                {'評估項目':'LINE ΔE* 最不利預測值', '人工確認初始界限':_iqr_line_peak, '初步建議界限':_line_worst},
+                {'評估項目':'LINE ΔE* 規格', '人工確認初始界限':line_de_target, '初步建議界限':line_de_target},
+                {'評估項目':'LINE 規格餘裕', '人工確認初始界限':_iqr_margin, '初步建議界限':_proposed_margin},
+                {'評估項目':'風險判定', '人工確認初始界限':_iqr_start_label, '初步建議界限':_proposed_risk},
             ])
             _iqr_compare_display=_iqr_comparison.copy()
-            for _col in ('原始 IQR 界限','初步建議界限'):
+            for _col in ('人工確認初始界限','初步建議界限'):
                 _iqr_compare_display[_col]=_iqr_compare_display[_col].map(
                     lambda v:f'{float(v):.2f}' if isinstance(v,(int,float,np.number)) and np.isfinite(v)
                     else ('—' if isinstance(v,(int,float,np.number)) else str(v)))
             st.dataframe(_iqr_compare_display,use_container_width=True,hide_index=True)
-            with st.expander('人工確認界限（與 IQR 不同時，供額外查核）',expanded=False):
+            with st.expander('完整規格與人工確認界限風險明細（供查核）',expanded=False):
                 st.dataframe(_compare_display,use_container_width=True,hide_index=True)
-            st.caption('兩欄均採同一批歷史 Shift Min/Max 保守包絡，判定依未四捨五入結果；原始 IQR 不等於人工確認界限。')
+            st.caption('兩欄均採同一批歷史 Shift Min/Max 保守包絡，判定依未四捨五入結果；原始 IQR 統計值僅供參考；驗證使用人工確認界限。')
 
             # 5.3: no duplicate LCL/UCL tables; show evidence, position, and follow-up action.
             _paired_n = int(len(_paired))
@@ -2721,7 +2734,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 _conclusion = ('歷史 Shift Min/Max 條件下，尚無法推導符合 LAB 與 LINE 雙重規格的初步建議界限；'
                                '應先補充有效配對資料並確認製程變動。')
             else:
-                _conclusion = (f'依歷史 Shift Min/Max 進行壓力測試，原始 IQR LINE 最不利值 {_iqr_line_peak:.2f}，'
+                _conclusion = (f'依歷史 Shift Min/Max 進行壓力測試，人工確認初始界限 LINE 最不利值 {_iqr_line_peak:.2f}，'
                                f'建議界限下 {_line_worst:.2f}，規格餘裕 {_proposed_margin:.2f}。'
                                '本次界限僅作為初期管制參考，應持續收集 LAB–LINE 配對資料驗證。')
             st.markdown('**初步結論：** '+_conclusion)
@@ -2751,9 +2764,10 @@ elif app_mode == "🎛️ Control Limit Calculator":
             # Formula-level Excel audit with full numerical precision and 0.00 display.
             _excel_bytes = io.BytesIO()
             with pd.ExcelWriter(_excel_bytes, engine='openpyxl') as _writer:
-                _iqr_verification.to_excel(_writer, sheet_name='1_1_IQR_Risk', index=False)
-                _iqr_limits_table.to_excel(_writer, sheet_name='Original_IQR_Limits', index=False)
-                _iqr_comparison.to_excel(_writer, sheet_name='1_4_IQR_vs_Proposed', index=False)
+                _iqr_verification.to_excel(_writer, sheet_name='1_1_Confirmed_Risk', index=False)
+                _iqr_limits_table.to_excel(_writer, sheet_name='Confirmed_Limits', index=False)
+                _raw_iqr_limits_table.to_excel(_writer, sheet_name='Original_IQR_Reference', index=False)
+                _iqr_comparison.to_excel(_writer, sheet_name='1_4_Confirmed_vs_Proposed', index=False)
                 _shift_range_table.to_excel(_writer, sheet_name='1_2_Shift_Range', index=False)
                 _risk_overview.to_excel(_writer, sheet_name='Confirmed_Start_Risk', index=False)
                 _selected_limits_df.to_excel(_writer, sheet_name='Confirmed_Input_Limits', index=False)
@@ -3103,22 +3117,23 @@ elif app_mode == "🎛️ Control Limit Calculator":
             doc.add_heading('8. 補充分析｜LAB–LINE 色差偏移與產出品質風險評估', level=1)
             doc.add_paragraph(f'塗料編號：{color}；LAB ΔE* 規格 ≤ {lab_de_target:.2f}；'
                               f'LINE ΔE* 規格 ≤ {line_de_target:.2f}。')
-            doc.add_heading('1.1 原始 IQR 管制界限之品質風險驗證', level=2)
-            doc.add_paragraph('先使用本報告 IQR 統計所計算之三因子 LCL/UCL，而非人工確認界限。'
+            doc.add_heading('1.1 人工確認初始界限之品質風險驗證', level=2)
+            doc.add_paragraph('以使用者於可編輯表格人工確認之 LCL/UCL 作為本次初始界限；原始 IQR 統計結果僅供參考。'
                               '計算 LAB ΔE* 最不利組合，再以 LAB 合格且完整配對的歷史 Shift Min/Max'
                               ' 評估 LINE ΔE* 保守上界，以判斷是否有必要調整原始 IQR 界限。')
             add_table(_iqr_verification)
+            doc.add_paragraph('本節風險驗證採用人工確認界限；原始 IQR 統計值保留於前述統計分析與 Excel 參考工作表。')
             doc.add_paragraph('註：最不利值為三因子 Shift 極值的獨立保守組合，非實際單一製造批號之測量值。')
             doc.add_heading('1.2 LAB–LINE 歷史色差偏移分析', level=2)
             doc.add_paragraph('Shift = 同批 LINE − LAB；使用 LAB ΔE* 合格且三因子完整配對的批次，未排除 LINE NG。')
             add_table(_shift_range_table)
             doc.add_heading('1.3 入料管制界限調整與初步建議', level=2)
-            doc.add_paragraph('原始 IQR 界限有超規風險時，結合歷史 Shift 推算補償中心及係數 t；'
-                              '以下單一表格列出公式、實際代入與建議 LCL/UCL。若原始 IQR 已符合雙重規格，'
+            doc.add_paragraph('人工確認界限有超規風險時，結合歷史 Shift 推算補償中心及係數 t；'
+                              '以下單一表格列出公式、實際代入與建議 LCL/UCL。若人工確認界限已符合雙重規格，'
                               '不應僅為本模型而強制採用新界限。')
             add_table(_appendix_one_table)
             doc.add_heading('1.4 調整前後 LINE 品質風險比較', level=2)
-            doc.add_paragraph('原始 IQR 與建議界限使用相同歷史 Shift Min/Max 模型；所有判定採未四捨五入值。')
+            doc.add_paragraph('人工確認初始界限與建議界限使用相同歷史 Shift Min/Max 模型；所有判定採未四捨五入值。')
             add_table(_iqr_comparison)
             doc.add_paragraph('初步結論：' + (_conclusion or '目前資料不足，無法提出初步界限。'))
             doc.add_paragraph('註：歷史 Shift Min/Max 情境係保守評估，非未來 LINE 零超規保證；'
@@ -3144,7 +3159,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
                               '計算採未四捨五入精度，公式代入式及表列顯示兩位小數，尾數可能略有差異。')
 
             doc.add_heading('A4. 同批 Shift 情境追溯（補充）', level=2)
-            doc.add_paragraph('原始 IQR 與初步建議界限之比較已列於正文 1.4。')
+            doc.add_paragraph('人工確認初始界限與初步建議界限之比較已列於正文 1.4。')
             doc.add_paragraph('LINE 規格餘裕 = LINE ΔE* 規格 − LINE 保守最不利值。'
                               '保守情境將三因子 Shift 的觀測極值獨立組合，'
                               '可能包含歷史上未曾同時出現的組合。')
