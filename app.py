@@ -2655,8 +2655,8 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 {'評估項目':'LINE 規格餘裕', '結果':_current_margin},
             ])
 
-            st.markdown('### 1.3｜兩種方法之入料管制界限建議')
-            st.markdown('#### 表 A｜獨立極值 Shift 法－保守建議界限')
+            st.markdown('### 1.3｜補償中心與係數 t－初步管制界限')
+            st.caption('主要方法：獨立 Shift Min/Max → 補償中心 C → 最大可行擴展係數 t。')
             _opt = task3_line_risk_box(_valid_paired[_lab_keys].to_numpy(float),
                                        _shift_matrix, lab_de_target, line_de_target)
             if _iqr_lab_peak <= lab_de_target + 1e-10 and np.isfinite(_iqr_line_peak) and _iqr_line_peak <= line_de_target + 1e-10:
@@ -2733,9 +2733,9 @@ elif app_mode == "🎛️ Control Limit Calculator":
                                      'UCL 計算結果':float(_b_hi[_j])})
                 _appendix_corner_audit=pd.DataFrame(_corners)
 
-            st.markdown('**表 A 計算依據（Shift Min/Max 補償中心與擴展係數）**')
+            st.markdown('**係數 t 建議界限之計算依據**')
             if not _appendix_one_table.empty:
-                with st.expander('展開表 A 計算明細（公式與實際代入）', expanded=False):
+                with st.expander('查看係數 t 逐步計算與公式（可下載 Excel）', expanded=False):
                     st.dataframe(task3_format_calculation_table(_appendix_one_table),
                                  use_container_width=True, hide_index=True)
                     # Download ONLY this calculation table, directly beneath its display.
@@ -2781,157 +2781,224 @@ elif app_mode == "🎛️ Control Limit Calculator":
             else:
                 st.info('配對數據不足或未能找到可行界限，因此不顯示計算明細。')
 
-            # NEW: separate production-feasibility proposal, preserving the original
-            # conservative Min/Max result and all existing statistical calculations.
-            st.markdown('#### 表 B｜歷史完整配對 Shift 法－製程可行建議界限')
-            st.caption('以每批實際的三因子 Shift 組合評估，不把不同批次的極值合成同一情境；'
-                       '並容許三個因子獨立調整，以初始人工確認界限為邊界。'
-                       '此為歷史情境驗證，不代表未來零超規。')
-            # Statistical widths are calculated from ALL in-spec LAB batches,
-            # not from a guessed fixed value or the smaller paired-only subset.
-            _width0 = _hi-_lo
+            # 1.3: quality-first feasibility screening of the t candidate.
+            # Q1-Q3 coverage is a *screening flag*, not proven process capability.
             _lab_width_stats = task3_lab_width_statistics(_labs, _lab_keys, _lo, _hi)
-            st.markdown('**製程寬度之統計依據（同色號 LAB 合格批次）**')
-            st.dataframe(_lab_width_stats.style.format({
-                'P5':'{:.2f}', 'Q1':'{:.2f}', 'Q3':'{:.2f}', 'P95':'{:.2f}',
-                'IQR = Q3 − Q1':'{:.2f}', 'P5–P95 寬度':'{:.2f}',
-                '人工確認界限寬度':'{:.2f}', 'IQR / 初始寬度 (%)':'{:.2f}'
-            }), use_container_width=True, hide_index=True)
-            st.caption('統計公式：IQR = Q3 − Q1；P5–P95 寬度 = P95 − P5。'
-                       '資料為本色號完整三因子且 LAB ΔE* 合格的所有批次（不要求 LINE 配對）。'
-                       'IQR 為歷史數據核心 50% 的分散寬度，非經證實之產線最小可控寬度。')
-            _width_mode = st.radio(
-                '建議界限寬度限制之選取方式',
-                options=['IQR 統計參考寬度（預設；非產線能力保證）',
-                         '不設最小寬度（僅依品質規格最佳化）',
-                         '人工確認製程最小寬度（須附現場依據）'],
-                index=0, horizontal=False,
-                key=f'task3_width_mode_{str(color)}',
-            )
-            _iqr_widths = _lab_width_stats['IQR = Q3 − Q1'].to_numpy(float)
-            _min_width_values = []
-            _width_source = ''
-            if _width_mode.startswith('IQR'):
-                _min_width_values = _iqr_widths.tolist()
-                _width_source = '歷史 LAB 合格批次 Q3−Q1（IQR）'
-                if len(_labs.loc[_labs['LAB 規格合格']]) < 8:
-                    st.warning('LAB 合格批數少於 8；IQR 估計不穩定，僅供探索性分析，請擴充樣本。')
-                if np.any(~np.isfinite(_iqr_widths)) or np.any(_iqr_widths <= 0):
-                    st.warning('LAB IQR 缺少有效正值，無法以 IQR 設定寬度限制；改用「不設最小寬度」或補充資料。')
-                if np.any(_iqr_widths > _width0):
-                    st.warning('部分 LAB IQR 大於人工確認界限的可用寬度，這些條件不可能同時滿足；'
-                               '請檢查起始界限，不自動截斷 IQR 以製造可行假象。')
-            elif _width_mode.startswith('不設'):
-                _min_width_values = [0.0, 0.0, 0.0]
-                _width_source = '無外加最小寬度；僅品質規格約束'
-            else:
-                _width_source = '人工確認；需附設備/量測/製程能力之佐證'
-                st.warning('人工設定寬度不能單憑 IQR 宣稱為製程能力；應有重複量測、現場能力或歷史允收證據。')
-                _width_cols = st.columns(3)
-                for _j, _factor in enumerate(_names):
-                    with _width_cols[_j]:
-                        _minimum = st.number_input(
-                            f'{_factor} 人工確認最小寬度',
-                            min_value=0.0, max_value=float(_width0[_j]),
-                            value=0.0, step=0.01, format='%.3f',
-                            key=f'task3_feasible_width_manual_{_j}_{str(color)}',
-                        )
-                        _min_width_values.append(float(_minimum))
-                _source_note = st.text_input('人工設定之依據（例如：GRR、歷史允收率或製程能力報告）',
-                    key=f'task3_width_evidence_{str(color)}',
-                    placeholder='請填寫實際佐證文件或數據來源')
-                if not _source_note.strip():
-                    st.info('尚未提供現場依據：輸出將標示「人工假設」，不得稱為已驗證製程可控寬度。')
-                else:
-                    _width_source += '：' + _source_note.strip()
+            _t_width_assessment = pd.DataFrame()
             _width_basis_table = _lab_width_stats.copy()
-            _width_basis_table['採用之寬度下限'] = _min_width_values
-            _width_basis_table['設定依據'] = _width_source
-            if (_width_mode.startswith('IQR') and
-                (np.any(~np.isfinite(_iqr_widths)) or np.any(_iqr_widths <= 0))):
-                _feasible_result = {'error':'IQR 缺少有效正值；請選擇其他模式或補充資料。'}
-            else:
-                _feasible_result = task3_feasible_paired_limits(
-                    _lo,_hi,_shift_matrix,lab_de_target,line_de_target,_min_width_values)
-            if 'error' in _feasible_result:
-                st.warning(_feasible_result['error'])
-            else:
-                _f_lo=np.asarray(_feasible_result['lo'],float)
-                _f_hi=np.asarray(_feasible_result['hi'],float)
-                _feasible_limits_table = pd.DataFrame({
-                    '因子':_names, '人工確認 LCL':_lo, '人工確認 UCL':_hi,
-                    '極值保守建議 LCL': _b_lo if _b_lo is not None else [np.nan]*3,
-                    '極值保守建議 UCL': _b_hi if _b_hi is not None else [np.nan]*3,
-                    '配對 Shift 建議 LCL':_f_lo, '配對 Shift 建議 UCL':_f_hi,
-                    '採用之寬度下限（非製程能力保證）':_min_width_values,
-                    '配對建議寬度':_f_hi-_f_lo,
-                    '寬度保留率 (%)':100*_feasible_result['width_ratio'],
+            _width_source = '未啟用補充配對 Shift；IQR 僅作分布參考'
+            _needs_paired = False
+            _supplement_triggered = False
+            _chosen_label = '係數 t 初步建議'
+            _chosen_lo = _b_lo.copy() if _b_lo is not None else None
+            _chosen_hi = _b_hi.copy() if _b_hi is not None else None
+            _iqr_lab_population = _labs.loc[_labs['LAB 規格合格'], _lab_keys].to_numpy(float)
+            if _b_lo is not None and not _lab_width_stats.empty:
+                _q1 = _lab_width_stats['Q1'].to_numpy(float)
+                _q3 = _lab_width_stats['Q3'].to_numpy(float)
+                _core_ok = (_b_lo <= _q1 + 1e-10) & (_q3 <= _b_hi + 1e-10)
+                _width_origin = _hi - _lo
+                _width_candidate = _b_hi - _b_lo
+                _t_width_assessment = pd.DataFrame({
+                    '色差因子': _names, 'LAB Q1': _q1, 'LAB Q3': _q3,
+                    '係數 t LCL': _b_lo, '係數 t UCL': _b_hi,
+                    '初始區間寬度': _width_origin, '係數 t 區間寬度': _width_candidate,
+                    '寬度保留率 (%)': np.divide(_width_candidate, _width_origin,
+                                             out=np.zeros(3), where=_width_origin > 0)*100,
+                    'Q1–Q3 是否完整涵蓋': ['是' if v else '否' for v in _core_ok],
                 })
-                _paired_limits_table = pd.DataFrame({
-                    '因子': _names,
-                    '人工確認 LCL': _lo, '人工確認 UCL': _hi,
-                    '完整配對建議 LCL': _f_lo, '完整配對建議 UCL': _f_hi,
-                    '區間寬度': _f_hi - _f_lo,
-                    '採用之寬度下限（非製程能力保證）': _min_width_values,
-                })
-                st.dataframe(_paired_limits_table.style.format(precision=2),
+                _n_lab_good = len(_iqr_lab_population)
+                _needs_paired = (not bool(np.all(_core_ok))) or (_n_lab_good < 8)
+                st.markdown('### 1.4｜係數 t 界限之合理性篩選')
+                st.dataframe(_t_width_assessment.style.format(precision=2),
                              use_container_width=True, hide_index=True)
-                _feasible_lab_history=_valid_paired[_lab_keys].to_numpy(float)
-                def _coverage(_l,_h):
-                    return float(np.mean(np.all((_feasible_lab_history>=_l-1e-10)
-                                            & (_feasible_lab_history<=_h+1e-10),axis=1))*100)
-                _feasible_comparison = pd.DataFrame([
-                    {'評估項目':'LAB ΔE* 最不利值',
-                     '人工確認初始界限':float(np.linalg.norm(np.maximum(np.abs(_lo),np.abs(_hi)))),
-                     '極值保守建議':_new_worst, '完整配對 Shift 建議':_feasible_result['lab_worst']},
-                    {'評估項目':'LINE ΔE* 最不利值（完整配對 Shift）',
-                     '人工確認初始界限':task3_paired_shift_peak(_lo,_hi,_shift_matrix),
-                     '極值保守建議':task3_paired_shift_peak(_b_lo,_b_hi,_shift_matrix) if _b_lo is not None else float('nan'),
-                     '完整配對 Shift 建議':_feasible_result['line_worst']},
-                    {'評估項目':'LINE 規格餘裕（完整配對 Shift）',
-                     '人工確認初始界限':line_de_target-task3_paired_shift_peak(_lo,_hi,_shift_matrix),
-                     '極值保守建議':line_de_target-task3_paired_shift_peak(_b_lo,_b_hi,_shift_matrix) if _b_lo is not None else float('nan'),
-                     '完整配對 Shift 建議':_feasible_result['margin']},
-                    {'評估項目':'LAB 合格配對批次涵蓋率 (%)',
-                     '人工確認初始界限':_coverage(_lo,_hi),
-                     '極值保守建議':_coverage(_b_lo,_b_hi) if _b_lo is not None else float('nan'),
-                     '完整配對 Shift 建議':_coverage(_f_lo,_f_hi)},
-                    {'評估項目':'LINE ΔE* 保守包絡（獨立 Min/Max）',
-                     '人工確認初始界限':_current_envelope,
-                     '極值保守建議':_line_worst,
-                     '完整配對 Shift 建議':task3_shift_envelope_peak(_f_lo,_f_hi,_shift_min,_shift_max)},
-                ])
-                _feasible_batch_audit,_feasible_worst_case=task3_stress_audit(
-                    _f_lo,_f_hi,_valid_paired,line_de_target)
-                _rounded_lo=np.round(_f_lo,2)
-                _rounded_hi=np.round(_f_hi,2)
-                _rounded_lab=float(np.linalg.norm(np.maximum(np.abs(_rounded_lo),np.abs(_rounded_hi))))
-                _rounded_line=task3_paired_shift_peak(_rounded_lo,_rounded_hi,_shift_matrix)
-                if _rounded_lab>lab_de_target+1e-9 or _rounded_line>line_de_target+1e-9:
-                    st.warning(f'實際採用兩位小數界限時須再評估：四捨五入後 LAB={_rounded_lab:.2f}，'
-                               f'完整配對 Shift LINE={_rounded_line:.2f}；不可直接宣稱符合。')
-                st.caption('歷史配對 Shift 合格僅表示通過已觀察批次的壓力測試；'
-                           '若獨立極值模型仍超過規格，兩者結論不得混用。'
-                           '優化屬數值候選，不保證全域最優。')
-                _feasible_buffer=io.BytesIO()
-                with pd.ExcelWriter(_feasible_buffer,engine='openpyxl') as _feasible_writer:
-                    _paired_limits_table.to_excel(_feasible_writer,sheet_name='Paired_Shift_Limits',index=False)
-                    _conservative_limits_table.to_excel(_feasible_writer,sheet_name='Conservative_Limits',index=False)
-                    _feasible_limits_table.to_excel(_feasible_writer,sheet_name='Feasible_LAB_Limits',index=False)
-                    _feasible_batch_audit.to_excel(_feasible_writer,sheet_name='Paired_Shift_Audit',index=False)
-                    _width_basis_table.to_excel(
-                        _feasible_writer,sheet_name='Width_Statistical_Basis',index=False)
-                    for _sheet in _feasible_writer.book.worksheets:
-                        _sheet.freeze_panes='A2'
-                        for _row in _sheet.iter_rows(min_row=2):
-                            for _cell in _row:
-                                if isinstance(_cell.value,(float,np.floating)):
-                                    _cell.number_format='0.00'
-                st.download_button('📥 下載製程可行界限評估 Excel',
-                    _feasible_buffer.getvalue(),
-                    file_name=f'{re.sub(r"[^A-Za-z0-9_-]+","_",str(color))}_Feasible_Paired_Shift.xlsx',
-                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                    key='task3_feasible_download')
+                _t_cov = float(np.mean(np.all((_iqr_lab_population >= _b_lo - 1e-10) &
+                                              (_iqr_lab_population <= _b_hi + 1e-10),axis=1))*100) if _n_lab_good else float('nan')
+                st.caption(f'合格 LAB 批數 n={_n_lab_good}；係數 t 區間之 LAB 歷史涵蓋率 = {_t_cov:.2f}%。'
+                           'Q1–Q3 為分布適用性篩選，不是產線能力或未來合格率保證。')
+                if _n_lab_good < 8:
+                    st.warning('LAB 合格歷史批數少於 8：分位數不穩定，建議補充資料；可選擇補充 Shift 評估，但結果僅供探索。')
+                if not np.all(_core_ok):
+                    _bad = ', '.join(_names[i] for i in range(3) if not _core_ok[i])
+                    st.warning(f'係數 t 區間未完整涵蓋 {_bad} 的 LAB Q1–Q3 核心分布；啟用補充方法評估。')
+                elif _n_lab_good >= 8:
+                    st.success('係數 t 界限涵蓋三因子 LAB Q1–Q3；無須自動採用第二套演算法。')
+            else:
+                st.markdown('### 1.4｜係數 t 界限之合理性篩選')
+                st.warning('係數 t 未建立有效候選；可啟用補充 Shift 法嘗試另尋候選。')
+                _needs_paired = True
+
+            # Only activate the supplementary method when screening flags a concern.
+            # A user can still opt out, but no second-method tables are shown otherwise.
+            if _needs_paired:
+                _supplement_triggered = st.checkbox(
+                    '啟用補充評估｜歷史完整配對 Shift 法（僅供原界限過窄或樣本不足時）',
+                    value=True, key=f'task3_activate_paired_{str(color)}')
+            if _supplement_triggered:
+                # NEW: separate production-feasibility proposal, preserving the original
+                # conservative Min/Max result and all existing statistical calculations.
+                st.markdown('#### 補充分析｜歷史完整配對 Shift 法－替代候選界限')
+                st.caption('以每批實際的三因子 Shift 組合評估，不把不同批次的極值合成同一情境；'
+                           '並容許三個因子獨立調整，以初始人工確認界限為邊界。'
+                           '此為歷史情境驗證，不代表未來零超規。')
+                # Statistical widths are calculated from ALL in-spec LAB batches,
+                # not from a guessed fixed value or the smaller paired-only subset.
+                _width0 = _hi-_lo
+                _lab_width_stats = task3_lab_width_statistics(_labs, _lab_keys, _lo, _hi)
+                st.markdown('**歷史 LAB 分布與寬度統計依據**')
+                st.dataframe(_lab_width_stats.style.format({
+                    'P5':'{:.2f}', 'Q1':'{:.2f}', 'Q3':'{:.2f}', 'P95':'{:.2f}',
+                    'IQR = Q3 − Q1':'{:.2f}', 'P5–P95 寬度':'{:.2f}',
+                    '人工確認界限寬度':'{:.2f}', 'IQR / 初始寬度 (%)':'{:.2f}'
+                }), use_container_width=True, hide_index=True)
+                st.caption('統計公式：IQR = Q3 − Q1；P5–P95 寬度 = P95 − P5。'
+                           '資料為本色號完整三因子且 LAB ΔE* 合格的所有批次（不要求 LINE 配對）。'
+                           'IQR 為歷史數據核心 50% 的分散寬度，非經證實之產線最小可控寬度。')
+                _width_mode = st.radio(
+                    '建議界限寬度限制之選取方式',
+                    options=['IQR 統計參考寬度（預設；非產線能力保證）',
+                             '不設最小寬度（僅依品質規格最佳化）',
+                             '人工確認製程最小寬度（須附現場依據）'],
+                    index=0, horizontal=False,
+                    key=f'task3_width_mode_{str(color)}',
+                )
+                _iqr_widths = _lab_width_stats['IQR = Q3 − Q1'].to_numpy(float)
+                _min_width_values = []
+                _width_source = ''
+                if _width_mode.startswith('IQR'):
+                    _min_width_values = _iqr_widths.tolist()
+                    _width_source = '歷史 LAB 合格批次 Q3−Q1（IQR）'
+                    if len(_labs.loc[_labs['LAB 規格合格']]) < 8:
+                        st.warning('LAB 合格批數少於 8；IQR 估計不穩定，僅供探索性分析，請擴充樣本。')
+                    if np.any(~np.isfinite(_iqr_widths)) or np.any(_iqr_widths <= 0):
+                        st.warning('LAB IQR 缺少有效正值，無法以 IQR 設定寬度限制；改用「不設最小寬度」或補充資料。')
+                    if np.any(_iqr_widths > _width0):
+                        st.warning('部分 LAB IQR 大於人工確認界限的可用寬度，這些條件不可能同時滿足；'
+                                   '請檢查起始界限，不自動截斷 IQR 以製造可行假象。')
+                elif _width_mode.startswith('不設'):
+                    _min_width_values = [0.0, 0.0, 0.0]
+                    _width_source = '無外加最小寬度；僅品質規格約束'
+                else:
+                    _width_source = '人工確認；需附設備/量測/製程能力之佐證'
+                    st.warning('人工設定寬度不能單憑 IQR 宣稱為製程能力；應有重複量測、現場能力或歷史允收證據。')
+                    _width_cols = st.columns(3)
+                    for _j, _factor in enumerate(_names):
+                        with _width_cols[_j]:
+                            _minimum = st.number_input(
+                                f'{_factor} 人工確認最小寬度',
+                                min_value=0.0, max_value=float(_width0[_j]),
+                                value=0.0, step=0.01, format='%.3f',
+                                key=f'task3_feasible_width_manual_{_j}_{str(color)}',
+                            )
+                            _min_width_values.append(float(_minimum))
+                    _source_note = st.text_input('人工設定之依據（例如：GRR、歷史允收率或製程能力報告）',
+                        key=f'task3_width_evidence_{str(color)}',
+                        placeholder='請填寫實際佐證文件或數據來源')
+                    if not _source_note.strip():
+                        st.info('尚未提供現場依據：輸出將標示「人工假設」，不得稱為已驗證製程可控寬度。')
+                    else:
+                        _width_source += '：' + _source_note.strip()
+                _width_basis_table = _lab_width_stats.copy()
+                _width_basis_table['採用之寬度下限'] = _min_width_values
+                _width_basis_table['設定依據'] = _width_source
+                if (_width_mode.startswith('IQR') and
+                    (np.any(~np.isfinite(_iqr_widths)) or np.any(_iqr_widths <= 0))):
+                    _feasible_result = {'error':'IQR 缺少有效正值；請選擇其他模式或補充資料。'}
+                else:
+                    _feasible_result = task3_feasible_paired_limits(
+                        _lo,_hi,_shift_matrix,lab_de_target,line_de_target,_min_width_values)
+                if 'error' in _feasible_result:
+                    st.warning(_feasible_result['error'])
+                else:
+                    _f_lo=np.asarray(_feasible_result['lo'],float)
+                    _f_hi=np.asarray(_feasible_result['hi'],float)
+                    _feasible_limits_table = pd.DataFrame({
+                        '因子':_names, '人工確認 LCL':_lo, '人工確認 UCL':_hi,
+                        '極值保守建議 LCL': _b_lo if _b_lo is not None else [np.nan]*3,
+                        '極值保守建議 UCL': _b_hi if _b_hi is not None else [np.nan]*3,
+                        '配對 Shift 建議 LCL':_f_lo, '配對 Shift 建議 UCL':_f_hi,
+                        '採用之寬度下限（非製程能力保證）':_min_width_values,
+                        '配對建議寬度':_f_hi-_f_lo,
+                        '寬度保留率 (%)':100*_feasible_result['width_ratio'],
+                    })
+                    _paired_limits_table = pd.DataFrame({
+                        '因子': _names,
+                        '人工確認 LCL': _lo, '人工確認 UCL': _hi,
+                        '完整配對建議 LCL': _f_lo, '完整配對建議 UCL': _f_hi,
+                        '區間寬度': _f_hi - _f_lo,
+                        '採用之寬度下限（非製程能力保證）': _min_width_values,
+                    })
+                    st.dataframe(_paired_limits_table.style.format(precision=2),
+                                 use_container_width=True, hide_index=True)
+                    _feasible_lab_history=_valid_paired[_lab_keys].to_numpy(float)
+                    def _coverage(_l,_h):
+                        return float(np.mean(np.all((_feasible_lab_history>=_l-1e-10)
+                                                & (_feasible_lab_history<=_h+1e-10),axis=1))*100)
+                    _feasible_comparison = pd.DataFrame([
+                        {'評估項目':'LAB ΔE* 最不利值',
+                         '人工確認初始界限':float(np.linalg.norm(np.maximum(np.abs(_lo),np.abs(_hi)))),
+                         '極值保守建議':_new_worst, '完整配對 Shift 建議':_feasible_result['lab_worst']},
+                        {'評估項目':'LINE ΔE* 最不利值（完整配對 Shift）',
+                         '人工確認初始界限':task3_paired_shift_peak(_lo,_hi,_shift_matrix),
+                         '極值保守建議':task3_paired_shift_peak(_b_lo,_b_hi,_shift_matrix) if _b_lo is not None else float('nan'),
+                         '完整配對 Shift 建議':_feasible_result['line_worst']},
+                        {'評估項目':'LINE 規格餘裕（完整配對 Shift）',
+                         '人工確認初始界限':line_de_target-task3_paired_shift_peak(_lo,_hi,_shift_matrix),
+                         '極值保守建議':line_de_target-task3_paired_shift_peak(_b_lo,_b_hi,_shift_matrix) if _b_lo is not None else float('nan'),
+                         '完整配對 Shift 建議':_feasible_result['margin']},
+                        {'評估項目':'LAB 合格配對批次涵蓋率 (%)',
+                         '人工確認初始界限':_coverage(_lo,_hi),
+                         '極值保守建議':_coverage(_b_lo,_b_hi) if _b_lo is not None else float('nan'),
+                         '完整配對 Shift 建議':_coverage(_f_lo,_f_hi)},
+                        {'評估項目':'LINE ΔE* 保守包絡（獨立 Min/Max）',
+                         '人工確認初始界限':_current_envelope,
+                         '極值保守建議':_line_worst,
+                         '完整配對 Shift 建議':task3_shift_envelope_peak(_f_lo,_f_hi,_shift_min,_shift_max)},
+                    ])
+                    _feasible_batch_audit,_feasible_worst_case=task3_stress_audit(
+                        _f_lo,_f_hi,_valid_paired,line_de_target)
+                    _rounded_lo=np.round(_f_lo,2)
+                    _rounded_hi=np.round(_f_hi,2)
+                    _rounded_lab=float(np.linalg.norm(np.maximum(np.abs(_rounded_lo),np.abs(_rounded_hi))))
+                    _rounded_line=task3_paired_shift_peak(_rounded_lo,_rounded_hi,_shift_matrix)
+                    if _rounded_lab>lab_de_target+1e-9 or _rounded_line>line_de_target+1e-9:
+                        st.warning(f'實際採用兩位小數界限時須再評估：四捨五入後 LAB={_rounded_lab:.2f}，'
+                                   f'完整配對 Shift LINE={_rounded_line:.2f}；不可直接宣稱符合。')
+                    st.caption('歷史配對 Shift 合格僅表示通過已觀察批次的壓力測試；'
+                               '若獨立極值模型仍超過規格，兩者結論不得混用。'
+                               '優化屬數值候選，不保證全域最優。')
+                    _feasible_buffer=io.BytesIO()
+                    with pd.ExcelWriter(_feasible_buffer,engine='openpyxl') as _feasible_writer:
+                        _paired_limits_table.to_excel(_feasible_writer,sheet_name='Paired_Shift_Limits',index=False)
+                        _conservative_limits_table.to_excel(_feasible_writer,sheet_name='Conservative_Limits',index=False)
+                        _feasible_limits_table.to_excel(_feasible_writer,sheet_name='Feasible_LAB_Limits',index=False)
+                        _feasible_batch_audit.to_excel(_feasible_writer,sheet_name='Paired_Shift_Audit',index=False)
+                        _width_basis_table.to_excel(
+                            _feasible_writer,sheet_name='Width_Statistical_Basis',index=False)
+                        for _sheet in _feasible_writer.book.worksheets:
+                            _sheet.freeze_panes='A2'
+                            for _row in _sheet.iter_rows(min_row=2):
+                                for _cell in _row:
+                                    if isinstance(_cell.value,(float,np.floating)):
+                                        _cell.number_format='0.00'
+                    st.download_button('📥 下載製程可行界限評估 Excel',
+                        _feasible_buffer.getvalue(),
+                        file_name=f'{re.sub(r"[^A-Za-z0-9_-]+","_",str(color))}_Feasible_Paired_Shift.xlsx',
+                        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                        key='task3_feasible_download')
+
+                if 'error' not in _feasible_result:
+                    _choose = st.radio('本次品質風險驗證採用的候選界限',
+                        ['係數 t 初步建議', '歷史完整配對 Shift 替代候選'],
+                        index=1, horizontal=True, key=f'task3_final_choice_{str(color)}')
+                    if _choose.startswith('歷史'):
+                        _chosen_label = _choose
+                        _chosen_lo = np.asarray(_feasible_result['lo'],float)
+                        _chosen_hi = np.asarray(_feasible_result['hi'],float)
+                    else:
+                        _chosen_label = _choose
+            elif _needs_paired and not _supplement_triggered:
+                st.caption('未啟用補充方法：仍以係數 t 為候選；分布適用性警示保留。')
 
             # 1.4: shared comparison inputs; use unrounded numbers for each verdict.
             # Both columns refer to the same calibrated Shift Min/Max envelope.
@@ -3008,19 +3075,81 @@ elif app_mode == "🎛️ Control Limit Calculator":
                  '完整配對 Shift 建議': vals[2]}
                 for label, vals in _method_rows
             ])
-            st.markdown('### 1.4｜三種入料界限之 LINE 品質風險比較（兩種 Shift 驗證）')
-            st.caption('比較對象：人工確認初始界限／獨立極值保守建議／歷史完整配對 Shift 建議。'
-                       '每一橫列清楚標明驗證方法；同一批歷史配對 Shift 資料，不混用評估結論。')
-            _method_display = _method_comparison.copy()
-            for _col in ('人工確認初始界限', '獨立極值保守建議', '完整配對 Shift 建議'):
-                _method_display[_col] = _method_display[_col].map(
-                    lambda v: ('—' if not np.isfinite(float(v)) else ('0.00' if round(float(v), 2) == 0 else f'{float(v):.2f}'))
-                    if isinstance(v, (int, float, np.number)) else str(v)
-                )
-            st.dataframe(_method_display, use_container_width=True, hide_index=True)
-            st.caption('完整配對法：每批三因子 Shift 保持同時發生；獨立極值法：不同批次之 Shift Min/Max'
-                       ' 可組成未觀察到的保守情境。兩種方法均為歷史壓力測試，非未來品質保證；'
-                       '表列數值為顯示精度，判定採原始精度。')
+            # 1.5: one decision table, initial vs selected candidate.
+            st.markdown('### 1.5｜最終候選界限與 LINE 品質風險驗證')
+            _chosen_source = _chosen_label if _chosen_lo is not None else '尚無可行候選'
+            st.caption(f'候選來源：{_chosen_source}。完整配對法與獨立極值法均列出，不能混用判定。')
+            _final_limits = pd.DataFrame({
+                '色差因子': _names, '人工確認初始 LCL': _lo, '人工確認初始 UCL': _hi,
+                '最終候選 LCL': _chosen_lo if _chosen_lo is not None else [np.nan]*3,
+                '最終候選 UCL': _chosen_hi if _chosen_hi is not None else [np.nan]*3,
+            })
+            st.dataframe(_final_limits.style.format(precision=2),
+                         use_container_width=True,hide_index=True)
+            _final_lab = _boxed_lab(_chosen_lo,_chosen_hi)
+            _final_paired = _boxed_paired(_chosen_lo,_chosen_hi)
+            _final_independent = _boxed_independent(_chosen_lo,_chosen_hi)
+            _final_risk = pd.DataFrame([
+                {'驗證項目':'LAB ΔE* 最不利值', '評估標準':f'≤ {lab_de_target:.2f}',
+                 '人工確認初始界限':_candidate_lab[0], '最終候選界限':_final_lab},
+                {'驗證項目':'LINE ΔE* 最不利值（完整配對 Shift）', '評估標準':f'≤ {line_de_target:.2f}',
+                 '人工確認初始界限':_candidate_paired[0], '最終候選界限':_final_paired},
+                {'驗證項目':'LINE 規格餘裕（完整配對 Shift）', '評估標準':'≥ 0',
+                 '人工確認初始界限':line_de_target-_candidate_paired[0],
+                 '最終候選界限':line_de_target-_final_paired},
+                {'驗證項目':'LINE ΔE* 保守上界（獨立 Shift Min/Max）', '評估標準':f'≤ {line_de_target:.2f}',
+                 '人工確認初始界限':_candidate_independent[0], '最終候選界限':_final_independent},
+                {'驗證項目':'LINE 規格餘裕（獨立 Shift Min/Max）', '評估標準':'≥ 0',
+                 '人工確認初始界限':line_de_target-_candidate_independent[0],
+                 '最終候選界限':line_de_target-_final_independent},
+                {'驗證項目':'完整配對 Shift 判定', '評估標準':'LAB 及 LINE 雙規格',
+                 '人工確認初始界限':_method_risk(_candidate_lab[0],_candidate_paired[0],'paired'),
+                 '最終候選界限':_method_risk(_final_lab,_final_paired,'paired')},
+                {'驗證項目':'獨立極值 Shift 判定', '評估標準':'LAB 及 LINE 雙規格',
+                 '人工確認初始界限':_method_risk(_candidate_lab[0],_candidate_independent[0],'independent'),
+                 '最終候選界限':_method_risk(_final_lab,_final_independent,'independent')},
+            ])
+            _risk_show = _final_risk.copy()
+            for _col in ('人工確認初始界限','最終候選界限'):
+                _risk_show[_col] = _risk_show[_col].map(
+                    lambda v: (('0.00' if round(float(v),2)==0 else f'{float(v):.2f}')
+                               if np.isfinite(float(v)) else '—')
+                    if isinstance(v,(int,float,np.number)) else str(v))
+            st.dataframe(_risk_show,use_container_width=True,hide_index=True)
+            if _chosen_lo is not None:
+                # Check the actual 2-decimal control limits, not just screen formatting.
+                _rl,_rh = np.round(_chosen_lo,2),np.round(_chosen_hi,2)
+                _rounded_lab_peak = _boxed_lab(_rl,_rh)
+                _rounded_paired_peak = _boxed_paired(_rl,_rh)
+                _rounded_ind_peak = _boxed_independent(_rl,_rh)
+                _round_ok = (_rounded_lab_peak <= lab_de_target+1e-10 and
+                             _rounded_paired_peak <= line_de_target+1e-10)
+                _rounding_verification = pd.DataFrame([
+                    {'驗證項目':'兩位小數 LAB ΔE* 最不利值','結果':_rounded_lab_peak,'規格':lab_de_target},
+                    {'驗證項目':'兩位小數完整配對 LINE ΔE*','結果':_rounded_paired_peak,'規格':line_de_target},
+                    {'驗證項目':'兩位小數獨立極值 LINE ΔE*','結果':_rounded_ind_peak,'規格':line_de_target},
+                ])
+                if not _round_ok:
+                    st.error('實際採用兩位小數候選界限後，LAB 或完整配對 Shift 的 LINE 驗證超規；不得宣稱符合。')
+                elif _rounded_ind_peak > line_de_target+1e-10:
+                    st.warning('兩位小數候選通過歷史完整配對 Shift；但獨立極值仍具超規風險，須後續生產驗證。')
+                else:
+                    st.success('兩位小數候選通過兩種歷史 Shift 壓力測試；仍非未來批次達標保證。')
+            else:
+                _rounding_verification = pd.DataFrame()
+                st.warning('目前未建立最終候選；請勿將初始界限稱為已改善界限。')
+            with st.expander('進階｜三組界限與兩種 Shift 方法之完整比較',expanded=False):
+                _method_display = _method_comparison.copy()
+                for _col in ('人工確認初始界限', '獨立極值保守建議', '完整配對 Shift 建議'):
+                    _method_display[_col] = _method_display[_col].map(
+                        lambda v: ('—' if not np.isfinite(float(v)) else f'{float(v):.2f}')
+                        if isinstance(v, (int,float,np.number)) else str(v))
+                st.dataframe(_method_display,use_container_width=True,hide_index=True)
+                if not _rounding_verification.empty:
+                    st.markdown('**最終候選兩位小數界限之重新驗證**')
+                    st.dataframe(_rounding_verification.style.format(precision=3),
+                                 use_container_width=True,hide_index=True)
+            st.caption('以上僅依歷史批次進行 Shift 壓力測試；Q1–Q3 為適用性篩選，不代表已驗證製程能力。')
             # 5.3: no duplicate LCL/UCL tables; show evidence, position, and follow-up action.
             _paired_n = int(len(_paired))
             _qualified_n = int(len(_valid_paired))
@@ -3034,15 +3163,13 @@ elif app_mode == "🎛️ Control Limit Calculator":
             ])
             with st.expander('後續驗證資料（配對批數與追蹤）', expanded=False):
                 st.dataframe(_followup,use_container_width=True,hide_index=True)
-            if _b_lo is None:
-                _conclusion = ('歷史 Shift Min/Max 條件下，尚無法推導符合 LAB 與 LINE 雙重規格的初步建議界限；'
-                               '應先補充有效配對資料並確認製程變動。')
+            if _chosen_lo is None:
+                _conclusion = '目前未建立可供確認的最終候選界限；請補充數據或重新評估品質規格與實際製程能力。'
             else:
-                _conclusion = (f'依歷史 Shift Min/Max 進行壓力測試，人工確認初始界限 LINE 最不利值 {_iqr_line_peak:.2f}，'
-                               f'建議界限下 {_line_worst:.2f}，規格餘裕 {_proposed_margin:.2f}。'
-                               '本次界限僅作為初期管制參考，應持續收集 LAB–LINE 配對資料驗證。')
+                _conclusion = (f'選擇「{_chosen_label}」：歷史完整配對 LINE 最不利值 '
+                               f'{_final_paired:.2f}；獨立 Shift Min/Max 保守上界 {_final_independent:.2f}。'
+                               '結果為歷史情境評估，仍須後續實際生產驗證。')
             st.markdown('**初步結論：** '+_conclusion)
-            st.caption('三項 Shift Min/Max 獨立組合可能包含歷史未發生的情境；不代表未來 LINE NG 機率。若實際採用四捨五入至兩位的小數界限，應另行重新驗證。')
 
             # Only one audit expander, rather than multiple technical tables in main report.
             with st.expander('計算依據與逐批資料（供查核）', expanded=False):
@@ -3072,6 +3199,11 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 _iqr_limits_table.to_excel(_writer, sheet_name='Confirmed_Limits', index=False)
                 _raw_iqr_limits_table.to_excel(_writer, sheet_name='Original_IQR_Reference', index=False)
                 _method_comparison.to_excel(_writer, sheet_name='1_4_Three_Methods', index=False)
+                _final_limits.to_excel(_writer, sheet_name='Final_Selected_Limits', index=False)
+                _final_risk.to_excel(_writer, sheet_name='Final_Risk_Verification', index=False)
+                _t_width_assessment.to_excel(_writer, sheet_name='t_Width_Screening', index=False)
+                if not _rounding_verification.empty:
+                    _rounding_verification.to_excel(_writer, sheet_name='Rounded_Limits_Check', index=False)
                 _conservative_limits_table.to_excel(_writer, sheet_name='1_3A_Conservative', index=False)
                 _paired_limits_table.to_excel(_writer, sheet_name='1_3B_Paired_Shift', index=False)
                 if '_width_basis_table' in locals():
@@ -3437,44 +3569,38 @@ elif app_mode == "🎛️ Control Limit Calculator":
             doc.add_heading('1.2 LAB–LINE 歷史色差偏移分析', level=2)
             doc.add_paragraph('Shift = 同批 LINE − LAB；使用 LAB ΔE* 合格且三因子完整配對的批次，未排除 LINE NG。')
             add_table(_shift_range_table)
-            doc.add_heading('1.3 兩種方法之入料管制界限建議', level=2)
-            doc.add_heading('表 A｜獨立極值 Shift 法－保守建議界限', level=3)
+            doc.add_heading('1.3 補償中心與係數 t－初步管制界限', level=2)
+            doc.add_paragraph('本節以獨立 Shift Min/Max 作為主要保守方法。')
             add_table(_conservative_limits_table)
-            doc.add_paragraph('人工確認界限有超規風險時，結合歷史 Shift 推算補償中心及係數 t；'
-                              '以下單一表格列出公式、實際代入與建議 LCL/UCL。若人工確認界限已符合雙重規格，'
-                              '不應僅為本模型而強制採用新界限。')
             add_table(_appendix_one_table)
-            doc.add_heading('表 B｜歷史完整配對 Shift 法－製程可行建議界限', level=3)
-            doc.add_paragraph('寬度限制來源：' + (_width_source if '_width_source' in locals() else '尚未計算')
-                              + '。IQR = Q3−Q1；此數值僅為歷史分散參考，不能直接視為製程能力。')
-            if '_width_basis_table' in locals():
+            doc.add_heading('1.4 係數 t 界限之合理性篩選', level=2)
+            doc.add_paragraph('以歷史合格 LAB 的 Q1–Q3 核心分布檢查係數 t 候選是否過窄；'
+                              '此項為分布篩選，非實際製程能力之證明。')
+            add_table(_t_width_assessment)
+            if _supplement_triggered:
+                doc.add_heading('補充評估｜歷史完整配對 Shift 替代候選', level=3)
+                doc.add_paragraph('歷史完整配對 Shift 保留各批三因子同步偏移；'
+                                  '寬度限制來源：'+_width_source+'。')
                 add_table(_width_basis_table)
-            doc.add_paragraph('在不超出人工確認初始 LAB 界限的前提下，依同一歷史批次完整三因子 Shift'
-                              ' 評估 LINE ΔE*，並容許三因子分別調整，並依所選統計參考或人工佐證之寬度條件評估。'
-                              '以下為數值候選及已觀察情境之驗證，並非未來產出保證。')
-            if not _feasible_limits_table.empty:
-                add_table(_paired_limits_table)
-                doc.add_paragraph('兩種建議及各因子寬度保留率詳細資料另列於 Excel；風險評估統一於 1.4 比較。')
-                _f_envelope=task3_shift_envelope_peak(_feasible_result['lo'],_feasible_result['hi'],_shift_min,_shift_max)
-                doc.add_paragraph(f'完整配對 Shift LINE ΔE* 最不利值：{_feasible_result["line_worst"]:.2f}；'
-                                  f'獨立 Min/Max 保守包絡：{_f_envelope:.2f}。'
-                                  '前者通過時，後者仍可能超規，兩種評估不得混為一談。')
-            else:
-                doc.add_paragraph('目前未找到同時滿足 LAB/LINE 規格與所選寬度限制的可行候選：'
-                                  +_feasible_result.get('error','資料不足。'))
-            doc.add_heading('1.4 三種入料界限之 LINE 品質風險比較', level=2)
-            doc.add_paragraph('同一批歷史配對資料，分別採完整配對 Shift 與獨立極值 Min/Max 驗證。'
-                              '各評估列已標示方法，判定依未四捨五入值。')
-            add_table(_method_comparison)
-            doc.add_paragraph('初步結論：歷史完整配對 Shift 法可作為製程可行性候選；'
-                              '若獨立極值法仍顯示超規風險，不得宣稱已消除全部情境風險。'
-                              '請結合實際產線可控寬度及後續批次進行確認。')
-            doc.add_paragraph('註：歷史 Shift Min/Max 情境係保守評估，非未來 LINE 零超規保證；'
-                              '若規格界限將以兩位小數實際執行，須另以四捨五入後之界限重新確認符合規格。')
+                if not _paired_limits_table.empty:
+                    add_table(_paired_limits_table)
+                else:
+                    doc.add_paragraph('補充方法未找到可行候選：'+_feasible_result.get('error','資料不足。'))
+            doc.add_heading('1.5 最終候選界限與 LINE 品質風險驗證', level=2)
+            doc.add_paragraph('最終候選來源：'+_chosen_source+'。同時列出完整配對及獨立極值 Shift 檢驗，'
+                              '兩者判定不可混用；所有數值以原始精度計算。')
+            add_table(_final_limits)
+            add_table(_final_risk)
+            if not _rounding_verification.empty:
+                doc.add_paragraph('下表核對實際兩位小數界限，不以未四捨五入結果代替現場執行值。')
+                add_table(_rounding_verification)
+            doc.add_paragraph(_conclusion)
+            doc.add_paragraph('註：歷史情境壓力測試不保證未來 LINE 零超規；'
+                              '正式上線須搭配新增批次監控及實際製程能力確認。')
 
             doc.add_page_break()
             doc.add_heading('附錄｜LAB 建議管制界限計算依據', level=1)
-            doc.add_paragraph('本附錄僅列逐批來源與計算核對；建議 LCL/UCL 及風險比較已分別列於正文 1.3 與 1.4，不再重複。')
+            doc.add_paragraph('本附錄僅列逐批來源與計算核對；建議 LCL/UCL 及風險比較已分別列於正文 1.3 與 1.5，不再重複。')
             doc.add_heading('A1. 歷史 LAB–LINE Shift 來源', level=2)
             doc.add_paragraph('資料單位：同一製造批號之 LAB 與 LINE 三項色差完整配對；'
                               'Shift = LINE 實測值 − LAB 實測值。'
@@ -3491,7 +3617,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
                               '計算採未四捨五入精度，公式代入式及表列顯示兩位小數，尾數可能略有差異。')
 
             doc.add_heading('A4. 同批 Shift 情境追溯（補充）', level=2)
-            doc.add_paragraph('人工確認初始界限與初步建議界限之比較已列於正文 1.4。')
+            doc.add_paragraph('人工確認初始界限與最終候選界限之比較已列於正文 1.5。')
             doc.add_paragraph('LINE 規格餘裕 = LINE ΔE* 規格 − LINE 保守最不利值。'
                               '保守情境將三因子 Shift 的觀測極值獨立組合，'
                               '可能包含歷史上未曾同時出現的組合。')
