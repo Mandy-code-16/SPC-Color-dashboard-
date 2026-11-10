@@ -2808,7 +2808,7 @@ elif app_mode == "🎛️ Control Limit Calculator":
                     'Q1–Q3 是否完整涵蓋': ['是' if v else '否' for v in _core_ok],
                 })
                 _n_lab_good = len(_iqr_lab_population)
-                _needs_paired = (not bool(np.all(_core_ok))) or (_n_lab_good < 8)
+                _needs_paired = not bool(np.all(_core_ok))  # 小樣本只警示，不自動判定界限過窄
                 st.markdown('### 1.4｜係數 t 界限之合理性篩選')
                 st.dataframe(_t_width_assessment.style.format(precision=2),
                              use_container_width=True, hide_index=True)
@@ -2817,12 +2817,12 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 st.caption(f'合格 LAB 批數 n={_n_lab_good}；係數 t 區間之 LAB 歷史涵蓋率 = {_t_cov:.2f}%。'
                            'Q1–Q3 為分布適用性篩選，不是產線能力或未來合格率保證。')
                 if _n_lab_good < 8:
-                    st.warning('LAB 合格歷史批數少於 8：分位數不穩定，建議補充資料；可選擇補充 Shift 評估，但結果僅供探索。')
+                    st.warning('LAB 合格歷史批數少於 8：Q1–Q3 分位數可能不穩定，請補充資料；不以樣本數不足單獨觸發替代方案。')
                 if not np.all(_core_ok):
                     _bad = ', '.join(_names[i] for i in range(3) if not _core_ok[i])
                     st.warning(f'係數 t 區間未完整涵蓋 {_bad} 的 LAB Q1–Q3 核心分布；啟用補充方法評估。')
                 elif _n_lab_good >= 8:
-                    st.success('係數 t 界限涵蓋三因子 LAB Q1–Q3；無須自動採用第二套演算法。')
+                    st.success('係數 t 界限涵蓋三因子 LAB Q1–Q3；維持係數 t 為唯一初步建議，不顯示替代方法選項。')
             else:
                 st.markdown('### 1.4｜係數 t 界限之合理性篩選')
                 st.warning('係數 t 未建立有效候選；可啟用補充 Shift 法嘗試另尋候選。')
@@ -2988,15 +2988,24 @@ elif app_mode == "🎛️ Control Limit Calculator":
                         key='task3_feasible_download')
 
                 if 'error' not in _feasible_result:
-                    _choose = st.radio('本次品質風險驗證採用的候選界限',
-                        ['係數 t 初步建議', '歷史完整配對 Shift 替代候選'],
-                        index=1, horizontal=True, key=f'task3_final_choice_{str(color)}')
-                    if _choose.startswith('歷史'):
-                        _chosen_label = _choose
+                    # Only display the alternative confirmation when the primary t-box
+                    # fails the Q1–Q3 screening AND a valid paired candidate exists.
+                    # Default always remains the principal coefficient-t candidate.
+                    st.markdown('**最終候選管制界限確認**')
+                    st.caption('係數 t 為主要建議。僅因其未完整涵蓋 LAB Q1–Q3，才提供歷史完整配對 Shift 替代方案。'
+                               '選擇替代方案不代表已證實產線能力或未來 LINE ΔE* 必定合格。')
+                    _use_paired = st.checkbox(
+                        '採用完整配對 Shift 替代候選（非預設；須檢視下方兩種風險驗證）',
+                        value=False,
+                        key=f'task3_confirm_paired_alternative_{str(color)}',
+                    )
+                    if _use_paired:
+                        _chosen_label = '歷史完整配對 Shift 替代候選'
                         _chosen_lo = np.asarray(_feasible_result['lo'],float)
                         _chosen_hi = np.asarray(_feasible_result['hi'],float)
                     else:
-                        _chosen_label = _choose
+                        _chosen_label = '係數 t 初步建議'
+                        st.caption('目前仍採係數 t 初步建議作為品質風險驗證的候選界限。')
             elif _needs_paired and not _supplement_triggered:
                 st.caption('未啟用補充方法：仍以係數 t 為候選；分布適用性警示保留。')
 
