@@ -787,6 +787,82 @@ def task3_shift_envelope_peak(lo, hi, shift_min, shift_max):
     return float(np.linalg.norm(np.max(np.abs(endpoints), axis=0)))
 
 
+def task3_paired_shift_peak(lo, hi, shifts):
+    """Worst LAB-box corner over each *observed complete paired* Shift vector."""
+    lo, hi = np.asarray(lo, float), np.asarray(hi, float)
+    shifts = np.asarray(shifts, float)
+    if shifts.ndim != 2 or shifts.shape[1] != 3 or len(shifts) == 0:
+        return float('nan')
+    extrema = np.maximum(np.abs(shifts + lo), np.abs(shifts + hi))
+    return float(np.max(np.linalg.norm(extrema, axis=1)))
+
+
+def task3_feasible_paired_limits(start_lo, start_hi, shift_vectors,
+                                 lab_spec, line_spec, min_width):
+    """Seek a wide LAB box inside user limits, respecting every observed 3D Shift.
+
+    Numerical SLSQP multi-start candidates are *not* proven globally optimal.
+    The resulting box is audited exactly against all observed vectors and corners.
+    """
+    try:
+        from scipy.optimize import minimize
+    except ImportError:
+        return {'error': '缺少 scipy：請於 requirements.txt 加入 scipy 後重新部署。'}
+    low, high = np.asarray(start_lo, float), np.asarray(start_hi, float)
+    shifts = np.asarray(shift_vectors, float)
+    minimum = np.asarray(min_width, float)
+    if (low.shape != (3,) or high.shape != (3,) or minimum.shape != (3,)
+        or shifts.ndim != 2 or shifts.shape[1] != 3 or len(shifts) < 3
+        or not np.isfinite(shifts).all() or not np.isfinite(low).all()
+        or not np.isfinite(high).all() or not np.isfinite(minimum).all()
+        or np.any(high <= low) or np.any(minimum <= 0)
+        or np.any(minimum > high-low)):
+        return {'error': '有效配對 Shift 至少需 3 批，且初始界限、各因子最小寬度必須有效。'}
+    width0 = high-low
+    def score(x):
+        w = np.maximum(x[3:]-x[:3], 1e-12)
+        return -float(np.log(w/width0).sum())
+    def feasibility(x):
+        a, b = x[:3], x[3:]
+        lab = np.linalg.norm(np.maximum(np.abs(a), np.abs(b)))
+        line_each = np.linalg.norm(np.maximum(np.abs(shifts+a), np.abs(shifts+b)), axis=1)
+        return np.r_[lab_spec-lab, line_spec-line_each, b-a-minimum]
+    bounds = [(float(low[i]), float(high[i])) for i in range(3)]*2
+    mid = (low+high)/2
+    mids = [mid, np.clip(-shifts.mean(axis=0),low,high),
+            np.clip(-np.median(shifts,axis=0),low,high)]
+    # Multiple box sizes give the solver opportunities to find feasible basins.
+    candidates=[]
+    for center in mids:
+        for fraction in (0.0, 0.25, 0.65, 1.0):
+            candidate_width = minimum+(width0-minimum)*fraction
+            a = np.maximum(low, center-candidate_width/2)
+            b = np.minimum(high, a+candidate_width)
+            a = np.maximum(low, b-candidate_width)
+            x0 = np.r_[a,b]
+            try:
+                sol = minimize(score,x0,method='SLSQP', bounds=bounds,
+                               constraints=[{'type':'ineq','fun':feasibility}],
+                               options={'maxiter':800,'ftol':1e-10})
+                if np.isfinite(sol.x).all() and np.min(feasibility(sol.x)) >= -1e-8:
+                    candidates.append(sol.x)
+            except (ValueError,FloatingPointError):
+                continue
+    if not candidates:
+        return {'error': '在歷史完整配對 Shift、LAB/LINE 規格及設定的最小寬度下，找不到可行界限；請勿將極窄區間當作可實施建議。'}
+    best = min(candidates,key=score)
+    lo,hi=best[:3].copy(),best[3:].copy()
+    lab_worst=float(np.linalg.norm(np.maximum(np.abs(lo),np.abs(hi))))
+    line_worst=task3_paired_shift_peak(lo,hi,shifts)
+    if (lab_worst > lab_spec+1e-7 or line_worst > line_spec+1e-7
+        or np.any((hi-lo) < minimum-1e-7)):
+        return {'error':'候選界限無法通過重新核對；不輸出建議。'}
+    return {'lo':lo, 'hi':hi, 'lab_worst':lab_worst, 'line_worst':line_worst,
+            'margin':line_spec-line_worst, 'width_ratio':(hi-lo)/width0,
+            'historical_shift_n':len(shifts),
+            'method':'完整配對 Shift：逐批三因子共同偏移 × LAB 界限八角落；非獨立 Min/Max。'}
+
+
 def task3_iqr_risk_table(iqr_lo, iqr_hi, shift_min, shift_max, lab_spec, line_spec):
     """Audit the user-confirmed starting LAB bounds (not necessarily raw IQR).
 
@@ -2363,6 +2439,10 @@ elif app_mode == "🎛️ Control Limit Calculator":
     _lab_keys = [f'LAB_{f}' for f in _factors]
     _shift_keys = [f'Shift_{f}' for f in _factors]
     _limits = pd.DataFrame()
+    _feasible_limits_table = pd.DataFrame()
+    _feasible_comparison = pd.DataFrame()
+    _feasible_batch_audit = pd.DataFrame()
+    _feasible_result = {'error': '尚未計算'}
     _risk = pd.DataFrame()
     _risk_overview = pd.DataFrame()
     _iqr_verification = pd.DataFrame()
@@ -2575,6 +2655,102 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 st.caption(f'補償中心 = ({_opt["center"][0]:.2f}, {_opt["center"][1]:.2f}, {_opt["center"][2]:.2f})；'
                            f'擴展係數 t = {_opt["scale"]:.2f}。')
 
+            # NEW: separate production-feasibility proposal, preserving the original
+            # conservative Min/Max result and all existing statistical calculations.
+            st.markdown('#### 製程可行性改善｜完整配對 Shift 建議')
+            st.caption('以每批實際的三因子 Shift 組合評估，不把不同批次的極值合成同一情境；'
+                       '並容許三個因子獨立調整，以初始人工確認界限為邊界。'
+                       '此為歷史情境驗證，不代表未來零超規。')
+            _width0 = _hi-_lo
+            _width_cols = st.columns(3)
+            _min_width_values=[]
+            for _j, _factor in enumerate(_names):
+                with _width_cols[_j]:
+                    _minimum = st.number_input(
+                        f'{_factor} 製程最小可控寬度',
+                        min_value=0.001, max_value=float(_width0[_j]),
+                        value=float(min(0.20 if _j<2 else 0.15, _width0[_j])),
+                        step=0.01, format='%.3f',
+                        key=f'task3_feasible_width_{_j}_{str(color)}',
+                    )
+                    _min_width_values.append(float(_minimum))
+            _feasible_result = task3_feasible_paired_limits(
+                _lo,_hi,_shift_matrix,lab_de_target,line_de_target,_min_width_values)
+            if 'error' in _feasible_result:
+                st.warning(_feasible_result['error'])
+            else:
+                _f_lo=np.asarray(_feasible_result['lo'],float)
+                _f_hi=np.asarray(_feasible_result['hi'],float)
+                _feasible_limits_table = pd.DataFrame({
+                    '因子':_names, '人工確認 LCL':_lo, '人工確認 UCL':_hi,
+                    '極值保守建議 LCL': _b_lo if _b_lo is not None else [np.nan]*3,
+                    '極值保守建議 UCL': _b_hi if _b_hi is not None else [np.nan]*3,
+                    '配對 Shift 建議 LCL':_f_lo, '配對 Shift 建議 UCL':_f_hi,
+                    '製程最小寬度':_min_width_values,
+                    '配對建議寬度':_f_hi-_f_lo,
+                    '寬度保留率 (%)':100*_feasible_result['width_ratio'],
+                })
+                st.dataframe(_feasible_limits_table.style.format(precision=2),
+                             use_container_width=True,hide_index=True)
+                _feasible_lab_history=_valid_paired[_lab_keys].to_numpy(float)
+                def _coverage(_l,_h):
+                    return float(np.mean(np.all((_feasible_lab_history>=_l-1e-10)
+                                            & (_feasible_lab_history<=_h+1e-10),axis=1))*100)
+                _feasible_comparison = pd.DataFrame([
+                    {'評估項目':'LAB ΔE* 最不利值',
+                     '人工確認初始界限':float(np.linalg.norm(np.maximum(np.abs(_lo),np.abs(_hi)))),
+                     '極值保守建議':_new_worst, '完整配對 Shift 建議':_feasible_result['lab_worst']},
+                    {'評估項目':'LINE ΔE* 最不利值（完整配對 Shift）',
+                     '人工確認初始界限':task3_paired_shift_peak(_lo,_hi,_shift_matrix),
+                     '極值保守建議':task3_paired_shift_peak(_b_lo,_b_hi,_shift_matrix) if _b_lo is not None else float('nan'),
+                     '完整配對 Shift 建議':_feasible_result['line_worst']},
+                    {'評估項目':'LINE 規格餘裕（完整配對 Shift）',
+                     '人工確認初始界限':line_de_target-task3_paired_shift_peak(_lo,_hi,_shift_matrix),
+                     '極值保守建議':line_de_target-task3_paired_shift_peak(_b_lo,_b_hi,_shift_matrix) if _b_lo is not None else float('nan'),
+                     '完整配對 Shift 建議':_feasible_result['margin']},
+                    {'評估項目':'LAB 合格配對批次涵蓋率 (%)',
+                     '人工確認初始界限':_coverage(_lo,_hi),
+                     '極值保守建議':_coverage(_b_lo,_b_hi) if _b_lo is not None else float('nan'),
+                     '完整配對 Shift 建議':_coverage(_f_lo,_f_hi)},
+                    {'評估項目':'LINE ΔE* 保守包絡（獨立 Min/Max）',
+                     '人工確認初始界限':_current_envelope,
+                     '極值保守建議':_line_worst,
+                     '完整配對 Shift 建議':task3_shift_envelope_peak(_f_lo,_f_hi,_shift_min,_shift_max)},
+                ])
+                st.markdown('**品質風險與製程可行性比較（同一批歷史配對資料）**')
+                st.dataframe(_feasible_comparison.style.format(precision=2),
+                             use_container_width=True,hide_index=True)
+                _feasible_batch_audit,_feasible_worst_case=task3_stress_audit(
+                    _f_lo,_f_hi,_valid_paired,line_de_target)
+                _rounded_lo=np.round(_f_lo,2)
+                _rounded_hi=np.round(_f_hi,2)
+                _rounded_lab=float(np.linalg.norm(np.maximum(np.abs(_rounded_lo),np.abs(_rounded_hi))))
+                _rounded_line=task3_paired_shift_peak(_rounded_lo,_rounded_hi,_shift_matrix)
+                if _rounded_lab>lab_de_target+1e-9 or _rounded_line>line_de_target+1e-9:
+                    st.warning(f'實際採用兩位小數界限時須再評估：四捨五入後 LAB={_rounded_lab:.2f}，'
+                               f'完整配對 Shift LINE={_rounded_line:.2f}；不可直接宣稱符合。')
+                st.caption('歷史配對 Shift 合格僅表示通過已觀察批次的壓力測試；'
+                           '若獨立極值模型仍超過規格，兩者結論不得混用。'
+                           '優化屬數值候選，不保證全域最優。')
+                _feasible_buffer=io.BytesIO()
+                with pd.ExcelWriter(_feasible_buffer,engine='openpyxl') as _feasible_writer:
+                    _feasible_limits_table.to_excel(_feasible_writer,sheet_name='Feasible_LAB_Limits',index=False)
+                    _feasible_comparison.to_excel(_feasible_writer,sheet_name='Risk_Comparison',index=False)
+                    _feasible_batch_audit.to_excel(_feasible_writer,sheet_name='Paired_Shift_Audit',index=False)
+                    pd.DataFrame([{'因子':_names[i],'最小可行寬度':_min_width_values[i]} for i in range(3)]).to_excel(
+                        _feasible_writer,sheet_name='Process_Requirements',index=False)
+                    for _sheet in _feasible_writer.book.worksheets:
+                        _sheet.freeze_panes='A2'
+                        for _row in _sheet.iter_rows(min_row=2):
+                            for _cell in _row:
+                                if isinstance(_cell.value,(float,np.floating)):
+                                    _cell.number_format='0.00'
+                st.download_button('📥 下載製程可行界限評估 Excel',
+                    _feasible_buffer.getvalue(),
+                    file_name=f'{re.sub(r"[^A-Za-z0-9_-]+","_",str(color))}_Feasible_Paired_Shift.xlsx',
+                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    key='task3_feasible_download')
+
             # Trace tables share the exact same, unrounded numerical inputs with the optimiser.
             # These are supplementary only; the management report has two main result tables.
             _appendix_one_table = pd.DataFrame()
@@ -2772,6 +2948,10 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 _risk_overview.to_excel(_writer, sheet_name='Confirmed_Start_Risk', index=False)
                 _selected_limits_df.to_excel(_writer, sheet_name='Confirmed_Input_Limits', index=False)
                 _limits.to_excel(_writer, sheet_name='5_2_LAB_Limits', index=False)
+                if not _feasible_limits_table.empty:
+                    _feasible_limits_table.to_excel(_writer, sheet_name='Feasible_LAB_Limits', index=False)
+                    _feasible_comparison.to_excel(_writer, sheet_name='Feasible_Risk_Compare', index=False)
+                    _feasible_batch_audit.to_excel(_writer, sheet_name='Feasible_Shift_Audit', index=False)
                 _comparison.to_excel(_writer, sheet_name='5_2_LINE_Verify', index=False)
                 _followup.to_excel(_writer, sheet_name='5_3_Followup', index=False)
                 if not _appendix_one_table.empty:
@@ -3132,6 +3312,20 @@ elif app_mode == "🎛️ Control Limit Calculator":
                               '以下單一表格列出公式、實際代入與建議 LCL/UCL。若人工確認界限已符合雙重規格，'
                               '不應僅為本模型而強制採用新界限。')
             add_table(_appendix_one_table)
+            doc.add_heading('1.3.1 製程可行性改善｜完整配對 Shift 法', level=2)
+            doc.add_paragraph('在不超出人工確認初始 LAB 界限的前提下，依同一歷史批次完整三因子 Shift'
+                              ' 評估 LINE ΔE*，並容許三因子分別調整，以符合使用者設定之製程最小寬度。'
+                              '以下為數值候選及已觀察情境之驗證，並非未來產出保證。')
+            if not _feasible_limits_table.empty:
+                add_table(_feasible_limits_table)
+                add_table(_feasible_comparison)
+                _f_envelope=task3_shift_envelope_peak(_feasible_result['lo'],_feasible_result['hi'],_shift_min,_shift_max)
+                doc.add_paragraph(f'完整配對 Shift LINE ΔE* 最不利值：{_feasible_result["line_worst"]:.2f}；'
+                                  f'獨立 Min/Max 保守包絡：{_f_envelope:.2f}。'
+                                  '前者通過時，後者仍可能超規，兩種評估不得混為一談。')
+            else:
+                doc.add_paragraph('目前未找到同時滿足 LAB/LINE 規格與製程最小寬度的可行候選：'
+                                  +_feasible_result.get('error','資料不足。'))
             doc.add_heading('1.4 調整前後 LINE 品質風險比較', level=2)
             doc.add_paragraph('人工確認初始界限與建議界限使用相同歷史 Shift Min/Max 模型；所有判定採未四捨五入值。')
             add_table(_iqr_comparison)
