@@ -1902,16 +1902,26 @@ elif app_mode == "🎛️ Control Limit Calculator":
         paired_all["Time"] = paired_all[_time_cols].min(axis=1)
         paired_all = paired_all.sort_values(["Time", "製造批號"]).reset_index(drop=True)
 
+        # Delta E*76: calculate at batch level from the three unrounded paired
+        # CIELAB component means. Do not add per-component absolute differences
+        # or take the average of row-level Delta E* values.
+        for _source in ("LAB", "LINE"):
+            _component_cols = [f"{_source}_{_f}" for _f in ("ΔL", "Δa", "Δb")]
+            _components = paired_all[_component_cols].apply(pd.to_numeric, errors="coerce")
+            paired_all[f"{_source}_ΔE"] = np.sqrt(_components.pow(2).sum(axis=1, min_count=3))
+
         display_paired = paired_all[[
             "製造批號", "Time",
             "LAB_ΔL", "LINE_ΔL",
             "LAB_Δa", "LINE_Δa",
-            "LAB_Δb", "LINE_Δb"
+            "LAB_Δb", "LINE_Δb",
+            "LAB_ΔE", "LINE_ΔE"
         ]].rename(columns={
             "製造批號": "Batch No.",
             "LAB_ΔL": "LAB_ΔL*", "LINE_ΔL": "LINE_ΔL*",
             "LAB_Δa": "LAB_Δa*", "LINE_Δa": "LINE_Δa*",
-            "LAB_Δb": "LAB_Δb*", "LINE_Δb": "LINE_Δb*"
+            "LAB_Δb": "LAB_Δb*", "LINE_Δb": "LINE_Δb*",
+            "LAB_ΔE": "LAB_ΔE*", "LINE_ΔE": "LINE_ΔE*"
         })
 
         st.caption(
@@ -1922,7 +1932,8 @@ elif app_mode == "🎛️ Control Limit Calculator":
             display_paired.style.format({
                 "LAB_ΔL*": "{:.2f}", "LINE_ΔL*": "{:.2f}",
                 "LAB_Δa*": "{:.2f}", "LINE_Δa*": "{:.2f}",
-                "LAB_Δb*": "{:.2f}", "LINE_Δb*": "{:.2f}"
+                "LAB_Δb*": "{:.2f}", "LINE_Δb*": "{:.2f}",
+                "LAB_ΔE*": "{:.2f}", "LINE_ΔE*": "{:.2f}"
             }, na_rep=""),
             hide_index=True,
             use_container_width=True
