@@ -2643,24 +2643,47 @@ elif app_mode == "🎛️ Control Limit Calculator":
             _shift_max = _shift_matrix.max(axis=0) if len(_shift_matrix) else None
             st.markdown('### 1.2｜LAB–LINE 歷史色差偏移分析')
             if _shift_min is not None:
-                # Show explicit formulas and substitutions without changing the Shift
-                # calculations. Numeric columns retain full precision for exports.
-                _shift_range_table = pd.DataFrame({
-                    '因子': _names,
-                    'Shift 最小值': _shift_min,
-                    'Shift 最大值': _shift_max,
-                    '變動幅度 (Max−Min)': _shift_max - _shift_min,
-                    '計算公式': [
-                        'Shiftᵢ = LINEᵢ − LABᵢ；Min = MIN(Shiftᵢ)；'
-                        'Max = MAX(Shiftᵢ)；變動幅度 = Max − Min'
-                    ] * len(_names),
-                    '代入計算': [
-                        f'{_shift_max[i]:.6f} − ({_shift_min[i]:.6f}) '
-                        f'= {(_shift_max[i] - _shift_min[i]):.6f} '
-                        f'≈ {(_shift_max[i] - _shift_min[i]):.2f}'
-                        for i in range(len(_names))
-                    ],
-                })
+                # Every MIN/MAX substitution comes from the SAME actual historical
+                # paired batch. Do not construct fictitious extrema by mixing batches.
+                # Underlying data retain full precision; displayed measurements use
+                # 6 decimals so subtraction can be audited despite 2-decimal results.
+                _shift_display_rows = []
+                for _i, _factor in enumerate(_factors):
+                    _shift_key = f'Shift_{_factor}'
+                    _min_idx = _valid_paired[_shift_key].idxmin()
+                    _max_idx = _valid_paired[_shift_key].idxmax()
+                    _min_row = _valid_paired.loc[_min_idx]
+                    _max_row = _valid_paired.loc[_max_idx]
+                    _min_batch = str(_min_row['製造批號'])
+                    _max_batch = str(_max_row['製造批號'])
+                    _min_line = float(_min_row[f'LINE_{_factor}'])
+                    _min_lab = float(_min_row[f'LAB_{_factor}'])
+                    _max_line = float(_max_row[f'LINE_{_factor}'])
+                    _max_lab = float(_max_row[f'LAB_{_factor}'])
+                    _min_val = float(_shift_min[_i])
+                    _max_val = float(_shift_max[_i])
+                    _shift_display_rows.append({
+                        '因子': _names[_i],
+                        'Shift 最小值': _min_val,
+                        '最小值計算公式': 'MIN(各有效批次 LINE − LAB)',
+                        '最小值代入計算': (
+                            f'批號 {_min_batch}：{_min_line:.6f} − ({_min_lab:.6f})'
+                            f' = {_min_val:.6f} ≈ {_min_val:.2f}'
+                        ),
+                        'Shift 最大值': _max_val,
+                        '最大值計算公式': 'MAX(各有效批次 LINE − LAB)',
+                        '最大值代入計算': (
+                            f'批號 {_max_batch}：{_max_line:.6f} − ({_max_lab:.6f})'
+                            f' = {_max_val:.6f} ≈ {_max_val:.2f}'
+                        ),
+                        '變動幅度 (Max−Min)': _max_val - _min_val,
+                        '變動幅度計算公式': 'Shift 最大值 − Shift 最小值',
+                        '變動幅度代入計算': (
+                            f'{_max_val:.6f} − ({_min_val:.6f})'
+                            f' = {_max_val - _min_val:.6f} ≈ {_max_val - _min_val:.2f}'
+                        ),
+                    })
+                _shift_range_table = pd.DataFrame(_shift_display_rows)
                 st.dataframe(
                     _shift_range_table.style.format({
                         'Shift 最小值': '{:.2f}',
@@ -2669,13 +2692,18 @@ elif app_mode == "🎛️ Control Limit Calculator":
                     }),
                     use_container_width=True, hide_index=True,
                     column_config={
-                        '計算公式': st.column_config.TextColumn('計算公式', width='large'),
-                        '代入計算': st.column_config.TextColumn('代入計算', width='large'),
+                        '最小值計算公式': st.column_config.TextColumn('最小值計算公式', width='large'),
+                        '最小值代入計算': st.column_config.TextColumn('最小值代入計算', width='large'),
+                        '最大值計算公式': st.column_config.TextColumn('最大值計算公式', width='large'),
+                        '最大值代入計算': st.column_config.TextColumn('最大值代入計算', width='large'),
+                        '變動幅度計算公式': st.column_config.TextColumn('變動幅度計算公式', width='large'),
+                        '變動幅度代入計算': st.column_config.TextColumn('變動幅度代入計算', width='large'),
                     },
                 )
                 st.caption('資料來源：LAB ΔE* 達本色號規格且 LAB / LINE 三因子完整配對的批次。'
                            'Shift = 同批 LINE − LAB；不事先移除 LINE NG。'
-                           '數值欄顯示兩位小數，代入計算保留六位小數，以避免四捨五入造成差異。')
+                           '最小與最大 Shift 各取自對應的實際批號；'
+                           '結果顯示兩位小數，代入計算保留六位小數，避免四捨五入造成差異。')
             else:
                 _shift_range_table = pd.DataFrame()
                 st.warning('沒有可用的 LAB–LINE 完整配對資料。')
