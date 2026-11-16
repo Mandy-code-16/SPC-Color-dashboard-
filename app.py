@@ -2643,12 +2643,39 @@ elif app_mode == "🎛️ Control Limit Calculator":
             _shift_max = _shift_matrix.max(axis=0) if len(_shift_matrix) else None
             st.markdown('### 1.2｜LAB–LINE 歷史色差偏移分析')
             if _shift_min is not None:
+                # Show explicit formulas and substitutions without changing the Shift
+                # calculations. Numeric columns retain full precision for exports.
                 _shift_range_table = pd.DataFrame({
-                    '因子':_names, 'Shift 最小值':_shift_min, 'Shift 最大值':_shift_max,
-                    '變動幅度 (Max−Min)':_shift_max-_shift_min,
+                    '因子': _names,
+                    'Shift 最小值': _shift_min,
+                    'Shift 最大值': _shift_max,
+                    '變動幅度 (Max−Min)': _shift_max - _shift_min,
+                    '計算公式': [
+                        'Shiftᵢ = LINEᵢ − LABᵢ；Min = MIN(Shiftᵢ)；'
+                        'Max = MAX(Shiftᵢ)；變動幅度 = Max − Min'
+                    ] * len(_names),
+                    '代入計算': [
+                        f'{_shift_max[i]:.6f} − ({_shift_min[i]:.6f}) '
+                        f'= {(_shift_max[i] - _shift_min[i]):.6f} '
+                        f'≈ {(_shift_max[i] - _shift_min[i]):.2f}'
+                        for i in range(len(_names))
+                    ],
                 })
-                st.dataframe(_shift_range_table.style.format(precision=2), use_container_width=True, hide_index=True)
-                st.caption('資料來源：LAB ΔE* 達本色號規格且 LAB / LINE 三因子完整配對的批次。Shift = 同批 LINE − LAB；不事先移除 LINE NG。')
+                st.dataframe(
+                    _shift_range_table.style.format({
+                        'Shift 最小值': '{:.2f}',
+                        'Shift 最大值': '{:.2f}',
+                        '變動幅度 (Max−Min)': '{:.2f}',
+                    }),
+                    use_container_width=True, hide_index=True,
+                    column_config={
+                        '計算公式': st.column_config.TextColumn('計算公式', width='large'),
+                        '代入計算': st.column_config.TextColumn('代入計算', width='large'),
+                    },
+                )
+                st.caption('資料來源：LAB ΔE* 達本色號規格且 LAB / LINE 三因子完整配對的批次。'
+                           'Shift = 同批 LINE − LAB；不事先移除 LINE NG。'
+                           '數值欄顯示兩位小數，代入計算保留六位小數，以避免四捨五入造成差異。')
             else:
                 _shift_range_table = pd.DataFrame()
                 st.warning('沒有可用的 LAB–LINE 完整配對資料。')
@@ -3247,6 +3274,8 @@ elif app_mode == "🎛️ Control Limit Calculator":
                 _paired.to_excel(_writer, sheet_name='Paired_LAB_LINE', index=False)
                 _valid_paired.to_excel(_writer, sheet_name='Shift_Calibration', index=False)
                 _shift_stats.to_excel(_writer, sheet_name='Shift_Summary', index=False)
+                if not _shift_range_table.empty:
+                    _shift_range_table.to_excel(_writer, sheet_name='Shift_Range_Calculation', index=False)
                 _stress_initial.to_excel(_writer, sheet_name='Confirmed_Shift_Stress', index=False)
                 _stress_proposed.to_excel(_writer, sheet_name='Proposed_Shift_Stress', index=False)
                 if _case_audit is not None:
