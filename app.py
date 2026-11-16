@@ -2704,6 +2704,58 @@ elif app_mode == "🎛️ Control Limit Calculator":
                            'Shift = 同批 LINE − LAB；不事先移除 LINE NG。'
                            '最小與最大 Shift 各取自對應的實際批號；'
                            '結果顯示兩位小數，代入計算保留六位小數，避免四捨五入造成差異。')
+                # Dedicated download buttons for this exact 1.2 table.
+                # Keep numeric data at full precision; Excel displays 2 decimals.
+                _shift_filename = re.sub(r'[^A-Za-z0-9_-]+', '_', str(color))
+                _shift_xlsx = io.BytesIO()
+                with pd.ExcelWriter(_shift_xlsx, engine='openpyxl') as _shift_writer:
+                    _shift_range_table.to_excel(_shift_writer, sheet_name='1_2_Shift_Analysis', index=False)
+                    _detail_cols = ['製造批號'] + [
+                        col for f in _factors
+                        for col in (f'LAB_{f}', f'LINE_{f}', f'Shift_{f}')
+                    ]
+                    _valid_paired[_detail_cols].to_excel(
+                        _shift_writer, sheet_name='Paired_Batch_Shift', index=False
+                    )
+                    from openpyxl.styles import Alignment, Font, PatternFill
+                    from openpyxl.utils import get_column_letter
+                    for _sheet in _shift_writer.book.worksheets:
+                        _sheet.freeze_panes = 'B2'
+                        _sheet.auto_filter.ref = _sheet.dimensions
+                        for _cell in _sheet[1]:
+                            _cell.font = Font(bold=True, color='FFFFFF')
+                            _cell.fill = PatternFill('solid', fgColor='1E4266')
+                            _cell.alignment = Alignment(vertical='center', wrap_text=True)
+                        _sheet.row_dimensions[1].height = 32
+                        for _col_idx, _column in enumerate(_sheet.columns, start=1):
+                            _letter = get_column_letter(_col_idx)
+                            _max_len = max(len(str(c.value or '')) for c in _column)
+                            _sheet.column_dimensions[_letter].width = min(75, max(15, _max_len + 3))
+                        for _row in _sheet.iter_rows(min_row=2):
+                            for _cell in _row:
+                                _cell.alignment = Alignment(vertical='top', wrap_text=True)
+                                if isinstance(_cell.value, (float, np.floating)):
+                                    _cell.number_format = '0.00' if _sheet.title == '1_2_Shift_Analysis' else '0.000000'
+                _shift_dl_a, _shift_dl_b = st.columns(2)
+                with _shift_dl_a:
+                    st.download_button(
+                        '📥 下載本表 1.2（Excel）',
+                        data=_shift_xlsx.getvalue(),
+                        file_name=f'{_shift_filename}_1_2_LAB_LINE_Shift.xlsx',
+                        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                        key='task3_shift_12_excel_download',
+                        use_container_width=True,
+                    )
+                with _shift_dl_b:
+                    st.download_button(
+                        '📥 下載本表 1.2（CSV）',
+                        data=_shift_range_table.to_csv(index=False).encode('utf-8-sig'),
+                        file_name=f'{_shift_filename}_1_2_LAB_LINE_Shift.csv',
+                        mime='text/csv',
+                        key='task3_shift_12_csv_download',
+                        use_container_width=True,
+                    )
+                st.caption('Excel 包含本表及逐批 LAB / LINE / Shift 計算明細；下載表格數值保留原始精度。')
             else:
                 _shift_range_table = pd.DataFrame()
                 st.warning('沒有可用的 LAB–LINE 完整配對資料。')
